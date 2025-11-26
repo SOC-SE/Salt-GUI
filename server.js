@@ -22,11 +22,11 @@ function readSettings() {
         } else {
             // Default settings
             const defaultSettings = {
-                proxyURL: 'http://localhost:3000',
-                saltAPIUrl: 'https://salt80.soc-se.org/salt-api',
-                username: 'sysadmin',
-                password: 'Changeme1!',
-                eauth: 'pam'
+                proxyURL: '',
+                saltAPIUrl: '',
+                username: '',
+                password: '',
+                eauth: ''
             };
             fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultSettings, null, 2));
             return defaultSettings;

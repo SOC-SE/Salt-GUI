@@ -56,6 +56,9 @@
                     <li>example_script4.ps1</li>-->
                 </ul>
                 <div id="script-args-container"></div>
+                <div id="custom-script-context-menu" class="context-menu">
+                    <div class="context-menu-item" id="context-menu-view">View</div>
+                </div>
                 <div id="custom-script-options">
                     <div id="error-message" style="color: red; margin-bottom: 10px;"></div>
                     <div class="script-arg-item" id="fallback-args-container">
@@ -72,11 +75,13 @@
             <div class="column">
                 <h2>System Monitoring</h2>
                 <div class="system-monitoring-controls">
-                    <select>
-                        <option>Select Device to View</option>
+                    <select id="monitoring-device-select">
+                        <option value="">Select Device to View</option>
                     </select>
-                    <select>
-                        <option>Select View</option>
+                    <select id="monitoring-view-select">
+                        <option value="">Select View</option>
+                        <option value="firewall-rules">Firewall Rules</option>
+                        <option value="running-processes">Running Processes</option>
                     </select>
                     <button class="btn btn-open-terminal">Open Terminal</button>
                     <button class="btn btn-refresh">Refresh</button>
@@ -141,6 +146,18 @@
                 </div>
                 <button type="submit" class="btn">Save Settings</button>
             </form>
+        </div>
+    </div>
+
+    <div id="script-viewer-modal" class="modal">
+        <div class="modal-content modal-lg">
+            <span id="script-viewer-close-button" class="close-button">&times;</span>
+            <h2 id="script-viewer-title">Script Content</h2>
+            <div id="script-viewer-content" class="code-display">
+                <pre><code>Loading script content...</code></pre>
+            </div>
+            <!-- <button id="edit-script-btn" class="btn">Edit</button> -->
+            <!-- <button id="save-script-btn" class="btn" style="display:none;">Save</button> -->
         </div>
     </div>
 </body>

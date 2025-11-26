@@ -115,6 +115,48 @@ app.get('/custom-scripts', async (req, res) => {
     }
 });
 
+// Route to get the content of a specific custom script
+app.get('/custom-script-content', async (req, res) => {
+    const scriptPath = req.query.path;
+    const settings = readSettings();
+
+    if (!scriptPath) {
+        return res.status(400).json({ message: 'Script path is required.' });
+    }
+    // Security validation: still prevent directory traversal, but allow forward slashes for subdirectories.
+    if (scriptPath.includes('..')) {
+        return res.status(400).json({ message: 'Invalid script path.' });
+    }
+
+    const payload = {
+        client: 'runner',
+        fun: 'salt.cmd',
+        // Execute 'cp.get_file_str' on the master with the script path as its argument.
+        arg: ['cp.get_file_str', `salt://${scriptPath}`],
+        username: settings.username,
+        password: settings.password,
+        eauth: settings.eauth
+    };
+
+    try {
+        const response = await axios.post(`${settings.saltAPIUrl}/run`, payload, {
+            headers: { 'Content-Type': 'application/json' }
+        });
+        // The return from salt.cmd will be the direct content of the file.
+        const result = response.data.return[0];
+        if (result === false || result === null || result === undefined) {
+            throw new Error('Salt API did not return file content. The file might not exist or there was a permissions issue.');
+        }
+        const content = result;
+        res.json({ content });
+    } catch (error) {
+        console.error(`Error fetching content for script ${scriptPath}:`, error.response ? error.response.data : error.message);
+        res.status(error.response ? error.response.status : 500).json({
+            message: `Error fetching content for script ${scriptPath} from Salt API`,
+            error: error.response ? error.response.data : error.message
+        });
+    }
+});
 
 // Route to list all minion keys
 app.get('/keys', async (req, res) => {

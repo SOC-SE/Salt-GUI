@@ -297,3 +297,53 @@ li.selected {
     cursor: pointer;
     margin-left: 20px;
 }
+
+/* Custom Context Menu Styling */
+.context-menu {
+    display: none; /* Hidden by default */
+    position: absolute; /* Positioned relative to the viewport */
+    background-color: #ffffff;
+    border: 1px solid #d1d1d1;
+    border-radius: 5px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 1000; /* Ensure it's on top */
+    min-width: 150px;
+    padding: 6px 0;
+    font-size: 14px;
+}
+
+.context-menu-item {
+    padding: 8px 16px;
+    color: #242424;
+    cursor: pointer;
+    display: block;
+    white-space: nowrap;
+}
+
+.context-menu-item:hover {
+    background-color: #007bff;
+    color: #ffffff;
+}
+
+/* Script Viewer Modal Specifics */
+.modal-content.modal-lg {
+    max-width: 900px;
+}
+
+.code-display {
+    background-color: #2d2d2d; /* Dark background for code */
+    color: #f8f8f2; /* Light text */
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 15px;
+    max-height: 60vh; /* Limit height and allow scrolling */
+    overflow: auto;
+    white-space: pre-wrap; /* Wrap long lines */
+    word-wrap: break-word;
+}
+
+.code-display pre {
+    margin: 0;
+    font-family: "Fira Code", "Courier New", Courier, monospace;
+    font-size: 14px;
+}

@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+
+# Configuration files with credentials
+config/auth.yaml
+config/salt.yaml
+
+# Logs
+logs/*.log
+logs/*.yaml
+*.log
+
+# Runtime files
+*.pid
+*.seed
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# User-managed content (keep structure, ignore content)
+scripts/linux/*
+scripts/windows/*
+states/linux/*
+states/windows/*
+playbooks/*.yaml
+!scripts/linux/.gitkeep
+!scripts/windows/.gitkeep
+!states/linux/.gitkeep
+!states/windows/.gitkeep
+!playbooks/.gitkeep
+
+# Uploaded files
+uploads/
+
+# Session data
+sessions/

@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Salt-GUI</title>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <!-- Login Screen -->
+  <div id="login-screen" class="screen">
+    <div class="login-container">
+      <h1 class="login-title">Salt-GUI</h1>
+      <p class="login-subtitle">Remote Administration Platform</p>
+
+      <form id="login-form" class="login-form">
+        <div class="form-group">
+          <label for="login-username">Username</label>
+          <input type="text" id="login-username" name="username" autocomplete="username" required>
+        </div>
+        <div class="form-group">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" name="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">Login</button>
+        <div id="login-error" class="error-message hidden"></div>
+      </form>
+
+      <!-- Setup Form (shown only when no users exist) -->
+      <form id="setup-form" class="login-form hidden">
+        <p class="setup-notice">Initial Setup Required</p>
+        <div class="form-group">
+          <label for="setup-username">Admin Username</label>
+          <input type="text" id="setup-username" name="username" value="admin" required>
+        </div>
+        <div class="form-group">
+          <label for="setup-password">Admin Password</label>
+          <input type="password" id="setup-password" name="password" required minlength="8">
+        </div>
+        <div class="form-group">
+          <label for="setup-confirm">Confirm Password</label>
+          <input type="password" id="setup-confirm" name="confirm" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">Create Admin User</button>
+        <div id="setup-error" class="error-message hidden"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main Application -->
+  <div id="app-screen" class="screen hidden">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <span class="logo">Salt-GUI</span>
+        <span id="connection-status" class="status-badge status-unknown">Checking...</span>
+      </div>
+      <div class="header-right">
+        <span id="current-user" class="user-info"></span>
+        <button id="logout-btn" class="btn btn-small">Logout</button>
+      </div>
+    </header>
+
+    <!-- Main Layout -->
+    <div class="main-layout">
+      <!-- Sidebar Navigation -->
+      <nav class="sidebar">
+        <div class="nav-section">
+          <div class="nav-item active" data-view="devices">Devices</div>
+          <div class="nav-item" data-view="keys">Keys</div>
+          <div class="nav-item" data-view="commands">Commands</div>
+          <div class="nav-item" data-view="scripts">Scripts</div>
+          <div class="nav-item" data-view="services">Services</div>
+          <div class="nav-item" data-view="processes">Processes</div>
+          <div class="nav-item" data-view="passwords">Passwords</div>
+          <div class="nav-item" data-view="audit">Audit Log</div>
+        </div>
+        <div class="nav-divider"></div>
+        <div class="nav-section">
+          <div class="nav-item" data-view="settings">Settings</div>
+        </div>
+        <div class="nav-divider"></div>
+        <div class="nav-section">
+          <div class="nav-item nav-emergency" data-view="emergency">EMERGENCY</div>
+        </div>
+      </nav>
+
+      <!-- Content Area -->
+      <main class="content">
+        <!-- Devices View -->
+        <div id="view-devices" class="view active">
+          <div class="view-header">
+            <h2>Devices</h2>
+            <div class="view-actions">
+              <button id="select-all-btn" class="btn btn-small">Select All</button>
+              <button id="select-linux-btn" class="btn btn-small">Select Linux</button>
+              <button id="select-windows-btn" class="btn btn-small">Select Windows</button>
+              <button id="clear-selection-btn" class="btn btn-small">Clear</button>
+              <button id="refresh-devices-btn" class="btn btn-small btn-primary">Refresh</button>
+            </div>
+          </div>
+          <div class="view-toolbar">
+            <input type="text" id="device-filter" class="filter-input" placeholder="Filter devices...">
+            <span id="device-count" class="count-badge">0 devices</span>
+            <span id="selected-count" class="count-badge">0 selected</span>
+          </div>
+          <div id="device-list" class="device-list">
+            <div class="loading">Loading devices...</div>
+          </div>
+        </div>
+
+        <!-- Keys View -->
+        <div id="view-keys" class="view hidden">
+          <div class="view-header">
+            <h2>Minion Key Management</h2>
+            <div class="view-actions">
+              <button id="accept-all-keys-btn" class="btn btn-small btn-primary">Accept All Pending</button>
+              <button id="refresh-keys-btn" class="btn btn-small">Refresh</button>
+            </div>
+          </div>
+          <div class="keys-panel">
+            <!-- Pending Keys -->
+            <div class="keys-section">
+              <h3 class="keys-section-header">
+                <span class="status-dot status-warning"></span>
+                Pending Keys
+                <span id="pending-count" class="count-badge">0</span>
+              </h3>
+              <div id="pending-keys-list" class="keys-list">
+                <div class="keys-empty">No pending keys</div>
+              </div>
+            </div>
+            <!-- Accepted Keys -->
+            <div class="keys-section">
+              <h3 class="keys-section-header">
+                <span class="status-dot status-online"></span>
+                Accepted Keys
+                <span id="accepted-count" class="count-badge">0</span>
+              </h3>
+              <div id="accepted-keys-list" class="keys-list">
+                <div class="keys-empty">No accepted keys</div>
+              </div>
+            </div>
+            <!-- Rejected Keys -->
+            <div class="keys-section">
+              <h3 class="keys-section-header">
+                <span class="status-dot status-offline"></span>
+                Rejected Keys
+                <span id="rejected-count" class="count-badge">0</span>
+              </h3>
+              <div id="rejected-keys-list" class="keys-list">
+                <div class="keys-empty">No rejected keys</div>
+              </div>
+            </div>
+            <!-- Denied Keys -->
+            <div class="keys-section">
+              <h3 class="keys-section-header">
+                <span class="status-dot status-offline"></span>
+                Denied Keys
+                <span id="denied-count" class="count-badge">0</span>
+              </h3>
+              <div id="denied-keys-list" class="keys-list">
+                <div class="keys-empty">No denied keys</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Commands View -->
+        <div id="view-commands" class="view hidden">
+          <div class="view-header">
+            <h2>Command Execution</h2>
+          </div>
+          <div class="command-panel">
+            <div class="command-options">
+              <div class="option-group">
+                <label>Target:</label>
+                <select id="cmd-target-type">
+                  <option value="selected">Selected Devices</option>
+                  <option value="all">All Devices (*)</option>
+                  <option value="custom">Custom Pattern</option>
+                </select>
+                <input type="text" id="cmd-custom-target" class="hidden" placeholder="e.g., web-* or minion-01">
+              </div>
+              <div class="option-group">
+                <label>Shell:</label>
+                <select id="cmd-shell">
+                  <option value="auto">Auto-detect</option>
+                  <option value="/bin/bash">Bash</option>
+                  <option value="powershell">PowerShell</option>
+                  <option value="cmd">CMD</option>
+                </select>
+              </div>
+              <div class="option-group">
+                <label>Timeout:</label>
+                <select id="cmd-timeout">
+                  <option value="30">30 seconds</option>
+                  <option value="60">60 seconds</option>
+                  <option value="120">2 minutes</option>
+                  <option value="300">5 minutes</option>
+                  <option value="600">10 minutes</option>
+                </select>
+              </div>
+            </div>
+            <div class="command-input-wrapper">
+              <span class="prompt">$</span>
+              <textarea id="cmd-input" class="command-input" placeholder="Enter command..." rows="3"></textarea>
+            </div>
+            <div class="command-actions">
+              <button id="cmd-execute-btn" class="btn btn-primary">Execute</button>
+              <button id="cmd-clear-btn" class="btn btn-small">Clear Output</button>
+            </div>
+          </div>
+          <div class="output-panel">
+            <div class="output-header">
+              <span>Output</span>
+              <button id="cmd-copy-btn" class="btn btn-small">Copy</button>
+            </div>
+            <pre id="cmd-output" class="output-content">No output yet.</pre>
+          </div>
+        </div>
+
+        <!-- Scripts View -->
+        <div id="view-scripts" class="view hidden">
+          <div class="view-header">
+            <h2>Script Deployment</h2>
+          </div>
+          <div class="scripts-layout">
+            <div class="scripts-sidebar">
+              <div class="scripts-header">
+                <span>Available Scripts</span>
+                <button id="refresh-scripts-btn" class="btn btn-small">Refresh</button>
+              </div>
+              <div class="scripts-filter">
+                <select id="scripts-os-filter">
+                  <option value="all">All</option>
+                  <option value="linux">Linux</option>
+                  <option value="windows">Windows</option>
+                </select>
+              </div>
+              <div id="scripts-tree" class="scripts-tree">
+                <div class="loading">Loading scripts...</div>
+              </div>
+            </div>
+            <div class="scripts-main">
+              <div class="script-info" id="script-info">
+                <p class="placeholder-text">Select a script to view details</p>
+              </div>
+              <div class="script-content-wrapper">
+                <div class="script-content-header">
+                  <span>Script Content</span>
+                </div>
+                <pre id="script-content" class="script-content">Select a script to view content.</pre>
+              </div>
+              <div class="script-execute-panel">
+                <div class="option-group">
+                  <label>Target:</label>
+                  <select id="script-target-type">
+                    <option value="selected">Selected Devices</option>
+                    <option value="all">All Devices (*)</option>
+                    <option value="custom">Custom Pattern</option>
+                  </select>
+                  <input type="text" id="script-custom-target" class="hidden" placeholder="e.g., web-* or minion-01">
+                </div>
+                <div class="option-group">
+                  <label>Arguments:</label>
+                  <input type="text" id="script-args" placeholder="Optional arguments">
+                </div>
+                <button id="script-execute-btn" class="btn btn-primary" disabled>Execute Script</button>
+              </div>
+              <div class="output-panel">
+                <div class="output-header">
+                  <span>Execution Output</span>
+                  <button id="script-copy-btn" class="btn btn-small">Copy</button>
+                </div>
+                <pre id="script-output" class="output-content">No output yet.</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Audit Log View -->
+        <div id="view-audit" class="view hidden">
+          <div class="view-header">
+            <h2>Audit Log</h2>
+            <div class="view-actions">
+              <button id="refresh-audit-btn" class="btn btn-small btn-primary">Refresh</button>
+            </div>
+          </div>
+          <div class="view-toolbar">
+            <select id="audit-action-filter">
+              <option value="">All Actions</option>
+            </select>
+            <select id="audit-user-filter">
+              <option value="">All Users</option>
+            </select>
+            <input type="number" id="audit-limit" value="100" min="10" max="1000" style="width: 80px;">
+            <span>entries</span>
+          </div>
+          <div id="audit-list" class="audit-list">
+            <div class="loading">Loading audit log...</div>
+          </div>
+        </div>
+
+        <!-- Services View -->
+        <div id="view-services" class="view hidden">
+          <div class="view-header">
+            <h2>Service Management</h2>
+          </div>
+          <div class="services-panel">
+            <div class="services-controls">
+              <div class="option-group">
+                <label>Target:</label>
+                <select id="svc-target-type">
+                  <option value="selected">Selected Devices</option>
+                  <option value="single">Single Device</option>
+                </select>
+                <select id="svc-single-target" class="hidden">
+                  <option value="">Select device...</option>
+                </select>
+              </div>
+              <button id="svc-load-btn" class="btn btn-primary">Load Services</button>
+            </div>
+            <div id="services-list" class="services-list">
+              <div class="loading">Select a target and click Load Services</div>
+            </div>
+            <div class="services-actions">
+              <div class="option-group">
+                <label>Service:</label>
+                <input type="text" id="svc-name" placeholder="Enter service name...">
+              </div>
+              <button id="svc-start-btn" class="btn btn-small">Start</button>
+              <button id="svc-stop-btn" class="btn btn-small">Stop</button>
+              <button id="svc-restart-btn" class="btn btn-small">Restart</button>
+              <button id="svc-enable-btn" class="btn btn-small">Enable</button>
+              <button id="svc-disable-btn" class="btn btn-small">Disable</button>
+            </div>
+            <div class="output-panel" style="margin-top: var(--spacing-md);">
+              <div class="output-header">
+                <span>Output</span>
+              </div>
+              <pre id="svc-output" class="output-content">No output yet.</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Processes View -->
+        <div id="view-processes" class="view hidden">
+          <div class="view-header">
+            <h2>Process Management</h2>
+          </div>
+          <div class="processes-panel">
+            <div class="processes-controls">
+              <div class="option-group">
+                <label>Target:</label>
+                <select id="proc-target-type">
+                  <option value="selected">Selected Devices</option>
+                  <option value="single">Single Device</option>
+                </select>
+                <select id="proc-single-target" class="hidden">
+                  <option value="">Select device...</option>
+                </select>
+              </div>
+              <div class="option-group">
+                <label>Limit:</label>
+                <input type="number" id="proc-limit" value="50" min="10" max="200" style="width: 80px;">
+              </div>
+              <button id="proc-load-btn" class="btn btn-primary">Load Processes</button>
+            </div>
+            <div id="processes-list" class="processes-list">
+              <div class="loading">Select a target and click Load Processes</div>
+            </div>
+            <div class="processes-actions">
+              <div class="option-group">
+                <label>PID:</label>
+                <input type="number" id="proc-pid" placeholder="PID" style="width: 100px;">
+              </div>
+              <div class="option-group">
+                <label>or Pattern:</label>
+                <input type="text" id="proc-pattern" placeholder="Process name pattern">
+              </div>
+              <button id="proc-kill-btn" class="btn btn-danger">Kill Process</button>
+              <button id="proc-pkill-btn" class="btn btn-danger">Kill by Pattern</button>
+            </div>
+            <div class="output-panel" style="margin-top: var(--spacing-md);">
+              <div class="output-header">
+                <span>Output</span>
+              </div>
+              <pre id="proc-output" class="output-content">No output yet.</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Passwords View -->
+        <div id="view-passwords" class="view hidden">
+          <div class="view-header">
+            <h2>Password Management</h2>
+          </div>
+          <div class="passwords-panel">
+            <div class="passwords-section">
+              <h3>Change Password on Remote Systems</h3>
+              <p class="section-description">Change user password on selected minions. Works on both Linux and Windows.</p>
+              <div class="password-form">
+                <div class="option-group">
+                  <label>Target:</label>
+                  <select id="pwd-target-type">
+                    <option value="selected">Selected Devices</option>
+                    <option value="all">All Devices (*)</option>
+                    <option value="custom">Custom Pattern</option>
+                  </select>
+                  <input type="text" id="pwd-custom-target" class="hidden" placeholder="e.g., web-*">
+                </div>
+                <div class="form-group">
+                  <label for="pwd-username">Username</label>
+                  <input type="text" id="pwd-username" placeholder="Username to change" required>
+                </div>
+                <div class="form-group">
+                  <label for="pwd-password">New Password</label>
+                  <input type="password" id="pwd-password" placeholder="New password" required minlength="8">
+                </div>
+                <div class="form-group">
+                  <label for="pwd-confirm">Confirm Password</label>
+                  <input type="password" id="pwd-confirm" placeholder="Confirm password" required>
+                </div>
+                <button id="pwd-change-btn" class="btn btn-primary">Change Password</button>
+              </div>
+            </div>
+            <div class="output-panel" style="margin-top: var(--spacing-md);">
+              <div class="output-header">
+                <span>Results</span>
+              </div>
+              <pre id="pwd-output" class="output-content">No output yet.</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Settings View -->
+        <div id="view-settings" class="view hidden">
+          <div class="view-header">
+            <h2>Settings</h2>
+          </div>
+          <div class="settings-panels">
+            <div class="settings-panel">
+              <h3>Salt API Connection</h3>
+              <form id="salt-settings-form">
+                <div class="form-group">
+                  <label for="salt-url">Salt API URL</label>
+                  <input type="url" id="salt-url" placeholder="https://localhost:8000">
+                </div>
+                <div class="form-group">
+                  <label for="salt-username">Username</label>
+                  <input type="text" id="salt-username" placeholder="saltadmin">
+                </div>
+                <div class="form-group">
+                  <label for="salt-password">Password</label>
+                  <input type="password" id="salt-password" placeholder="Leave blank to keep current">
+                </div>
+                <div class="form-group">
+                  <label for="salt-eauth">Auth Backend</label>
+                  <select id="salt-eauth">
+                    <option value="pam">PAM</option>
+                    <option value="file">File</option>
+                    <option value="ldap">LDAP</option>
+                  </select>
+                </div>
+                <div class="form-actions">
+                  <button type="button" id="test-salt-btn" class="btn btn-small">Test Connection</button>
+                  <button type="submit" class="btn btn-primary">Save Settings</button>
+                </div>
+                <div id="salt-test-result" class="test-result hidden"></div>
+              </form>
+            </div>
+            <div class="settings-panel">
+              <h3>Change Password</h3>
+              <form id="change-password-form">
+                <div class="form-group">
+                  <label for="current-password">Current Password</label>
+                  <input type="password" id="current-password" required>
+                </div>
+                <div class="form-group">
+                  <label for="new-password">New Password</label>
+                  <input type="password" id="new-password" required minlength="8">
+                </div>
+                <div class="form-group">
+                  <label for="confirm-new-password">Confirm New Password</label>
+                  <input type="password" id="confirm-new-password" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Change Password</button>
+                <div id="password-result" class="test-result hidden"></div>
+              </form>
+            </div>
+            <div class="settings-panel">
+              <h3>System Status</h3>
+              <div id="system-status">
+                <div class="loading">Loading status...</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Emergency View -->
+        <div id="view-emergency" class="view hidden">
+          <div class="view-header">
+            <h2>Emergency Actions</h2>
+          </div>
+          <div class="emergency-warning">
+            WARNING: These actions can disrupt services. Use only in emergencies.
+          </div>
+          <div class="emergency-panel">
+            <div class="emergency-action">
+              <h3>System Lockdown</h3>
+              <p>Block all incoming connections except Salt ports (4505/4506). Stops SSH, web servers, and other services. Salt connectivity is preserved.</p>
+              <div class="option-group">
+                <label>Target:</label>
+                <select id="emergency-target-type">
+                  <option value="selected">Selected Devices</option>
+                  <option value="all">All Devices</option>
+                  <option value="custom">Custom Pattern</option>
+                </select>
+                <input type="text" id="emergency-custom-target" class="hidden" placeholder="e.g., compromised-*">
+              </div>
+              <button id="lockdown-btn" class="btn btn-danger">INITIATE LOCKDOWN</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Confirmation Modal -->
+  <div id="confirm-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title">Confirm Action</h3>
+      </div>
+      <div class="modal-body">
+        <p id="modal-message"></p>
+      </div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn">Cancel</button>
+        <button id="modal-confirm" class="btn btn-danger">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notifications -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

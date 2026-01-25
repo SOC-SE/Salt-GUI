@@ -1,0 +1,782 @@
+/**
+ * Salt API Client
+ *
+ * Handles all communication with the Salt Master API.
+ * Manages authentication tokens, request formatting, and response parsing.
+ *
+ * @module lib/salt-client
+ */
+
+const axios = require('axios');
+const https = require('https');
+const { getSaltConfig } = require('./config');
+const logger = require('./logger');
+
+/**
+ * Salt API Client class
+ * Manages connection to Salt Master and executes commands
+ */
+class SaltAPIClient {
+  /**
+   * Create a Salt API Client
+   * @param {Object} [options] - Override default configuration
+   * @param {string} [options.url] - Salt API URL
+   * @param {string} [options.username] - Username for authentication
+   * @param {string} [options.password] - Password for authentication
+   * @param {string} [options.eauth] - Authentication backend (pam, ldap, etc.)
+   * @param {boolean} [options.verify_ssl] - Verify SSL certificates
+   */
+  constructor(options = {}) {
+    this.reload(options);
+  }
+
+  /**
+   * Reload configuration from disk or apply new options
+   * @param {Object} [options] - Override configuration
+   */
+  reload(options = {}) {
+    const config = getSaltConfig();
+
+    this.baseUrl = options.url || config.api.url;
+    this.username = options.username || config.api.username;
+    this.password = options.password || config.api.password;
+    this.eauth = options.eauth || config.api.eauth;
+    this.verifySsl = options.verify_ssl ?? config.api.verify_ssl ?? false;
+    this.defaultTimeout = (config.defaults?.timeout || 30) * 1000;
+
+    // Clear existing token on reload
+    this.token = null;
+    this.tokenExpiry = null;
+
+    // Create axios instance with appropriate settings
+    this.client = axios.create({
+      baseURL: this.baseUrl,
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      httpsAgent: this.baseUrl.startsWith('https://') ?
+        new https.Agent({ rejectUnauthorized: this.verifySsl }) : undefined
+    });
+
+    logger.debug(`Salt client configured for ${this.baseUrl}`);
+  }
+
+  /**
+   * Authenticate with the Salt API and obtain a token
+   * @returns {Promise<string>} Authentication token
+   * @throws {Error} If authentication fails
+   */
+  async authenticate() {
+    logger.debug('Authenticating with Salt API');
+
+    try {
+      const response = await this.client.post('/login', {
+        username: this.username,
+        password: this.password,
+        eauth: this.eauth
+      }, {
+        timeout: 10000
+      });
+
+      const auth = response.data.return?.[0];
+      if (!auth?.token) {
+        throw new Error('No token received from Salt API');
+      }
+
+      this.token = auth.token;
+      // Token expiry is in seconds since epoch
+      this.tokenExpiry = auth.expire * 1000;
+
+      logger.info(`Authenticated as ${this.username} (expires: ${new Date(this.tokenExpiry).toISOString()})`);
+      return this.token;
+    } catch (error) {
+      const message = error.response?.data?.return?.[0] || error.message;
+      logger.error('Salt API authentication failed', { message });
+      throw new Error(`Authentication failed: ${message}`);
+    }
+  }
+
+  /**
+   * Ensure we have a valid authentication token
+   * Re-authenticates if token is missing or about to expire
+   * @returns {Promise<void>}
+   */
+  async ensureAuthenticated() {
+    const now = Date.now();
+    const bufferTime = 60000; // Re-auth 1 minute before expiry
+
+    if (!this.token || !this.tokenExpiry || now >= this.tokenExpiry - bufferTime) {
+      await this.authenticate();
+    }
+  }
+
+  /**
+   * Execute a Salt API request
+   * @param {Object} options - Request options
+   * @param {string} options.client - Salt client (local, wheel, runner, local_async)
+   * @param {string} options.fun - Salt function to call
+   * @param {string|string[]} [options.tgt] - Target minions
+   * @param {string} [options.tgt_type='glob'] - Targeting type (glob, list, grain, compound)
+   * @param {Array} [options.arg] - Positional arguments
+   * @param {Object} [options.kwarg] - Keyword arguments
+   * @param {number} [options.timeout] - Request timeout in ms
+   * @returns {Promise<Object>} Salt API response
+   */
+  async run(options) {
+    await this.ensureAuthenticated();
+
+    const {
+      client,
+      fun,
+      tgt,
+      tgt_type = 'glob',
+      arg = [],
+      kwarg = {},
+      timeout = this.defaultTimeout
+    } = options;
+
+    const payload = {
+      client,
+      fun,
+      ...(tgt !== undefined && { tgt }),
+      ...(tgt !== undefined && { tgt_type }),
+      ...(arg.length > 0 && { arg }),
+      ...(Object.keys(kwarg).length > 0 && { kwarg })
+    };
+
+    logger.debug(`Salt API call: ${client}.${fun}`, { tgt, tgt_type });
+
+    try {
+      const response = await this.client.post('/run', payload, {
+        headers: { 'X-Auth-Token': this.token },
+        timeout
+      });
+
+      return response.data.return?.[0] || {};
+    } catch (error) {
+      // Handle token expiry
+      if (error.response?.status === 401) {
+        logger.warn('Token expired, re-authenticating');
+        this.token = null;
+        await this.ensureAuthenticated();
+
+        // Retry the request once
+        const response = await this.client.post('/run', payload, {
+          headers: { 'X-Auth-Token': this.token },
+          timeout
+        });
+        return response.data.return?.[0] || {};
+      }
+
+      const message = error.response?.data?.return?.[0] || error.message;
+      logger.error(`Salt API error: ${fun}`, { message });
+      throw new Error(`Salt API error: ${message}`);
+    }
+  }
+
+  // ============================================================
+  // Convenience Methods - Test & Status
+  // ============================================================
+
+  /**
+   * Ping minions to check connectivity
+   * @param {string} [target='*'] - Target pattern
+   * @returns {Promise<Object>} Map of minion_id -> true/false
+   */
+  async ping(target = '*') {
+    return this.run({
+      client: 'local',
+      fun: 'test.ping',
+      tgt: target
+    });
+  }
+
+  /**
+   * Get minion status (up/down)
+   * @returns {Promise<{up: string[], down: string[]}>} Status object
+   */
+  async status() {
+    const result = await this.run({
+      client: 'runner',
+      fun: 'manage.status'
+    });
+    return {
+      up: result?.up || [],
+      down: result?.down || []
+    };
+  }
+
+  /**
+   * List all minion keys
+   * @returns {Promise<Object>} Keys organized by status
+   */
+  async listKeys() {
+    return this.run({
+      client: 'wheel',
+      fun: 'key.list_all'
+    });
+  }
+
+  /**
+   * Accept a minion key
+   * @param {string} minionId - Minion ID to accept
+   * @returns {Promise<Object>} Result
+   */
+  async acceptKey(minionId) {
+    return this.run({
+      client: 'wheel',
+      fun: 'key.accept',
+      kwarg: { match: minionId }
+    });
+  }
+
+  /**
+   * Delete a minion key
+   * @param {string} minionId - Minion ID to delete
+   * @returns {Promise<Object>} Result
+   */
+  async deleteKey(minionId) {
+    return this.run({
+      client: 'wheel',
+      fun: 'key.delete',
+      kwarg: { match: minionId }
+    });
+  }
+
+  // ============================================================
+  // Convenience Methods - Grains (System Information)
+  // ============================================================
+
+  /**
+   * Get all grains for a target
+   * @param {string} [target='*'] - Target pattern
+   * @returns {Promise<Object>} Map of minion_id -> grains
+   */
+  async grains(target = '*') {
+    return this.run({
+      client: 'local',
+      fun: 'grains.items',
+      tgt: target
+    });
+  }
+
+  /**
+   * Get specific grain item(s)
+   * @param {string} target - Target pattern
+   * @param {string|string[]} items - Grain name(s) to retrieve
+   * @returns {Promise<Object>} Map of minion_id -> grain values
+   */
+  async grainsItem(target, items) {
+    const arg = Array.isArray(items) ? items : [items];
+    return this.run({
+      client: 'local',
+      fun: 'grains.item',
+      tgt: target,
+      arg
+    });
+  }
+
+  // ============================================================
+  // Convenience Methods - Command Execution
+  // ============================================================
+
+  /**
+   * Run a shell command on targets
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} command - Command to execute
+   * @param {Object} [options] - Additional options
+   * @param {string} [options.shell] - Shell to use (Linux: /bin/bash, Windows: powershell)
+   * @param {number} [options.timeout] - Command timeout in seconds
+   * @param {string} [options.runas] - User to run command as
+   * @param {string} [options.cwd] - Working directory
+   * @returns {Promise<Object>} Map of minion_id -> output
+   */
+  async cmd(target, command, options = {}) {
+    const {
+      shell,
+      timeout = 30,
+      runas,
+      cwd
+    } = options;
+
+    const kwarg = {
+      ...(shell && { shell }),
+      ...(runas && { runas }),
+      ...(cwd && { cwd }),
+      timeout
+    };
+
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+
+    return this.run({
+      client: 'local',
+      fun: 'cmd.run',
+      tgt: target,
+      tgt_type,
+      arg: [command],
+      kwarg,
+      timeout: (timeout + 10) * 1000 // HTTP timeout slightly longer
+    });
+  }
+
+  /**
+   * Run a command with return code information
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} command - Command to execute
+   * @param {Object} [options] - Additional options
+   * @returns {Promise<Object>} Map of minion_id -> {retcode, stdout, stderr}
+   */
+  async cmdAll(target, command, options = {}) {
+    const {
+      shell,
+      timeout = 30,
+      runas,
+      cwd
+    } = options;
+
+    const kwarg = {
+      ...(shell && { shell }),
+      ...(runas && { runas }),
+      ...(cwd && { cwd }),
+      timeout
+    };
+
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+
+    return this.run({
+      client: 'local',
+      fun: 'cmd.run_all',
+      tgt: target,
+      tgt_type,
+      arg: [command],
+      kwarg,
+      timeout: (timeout + 10) * 1000
+    });
+  }
+
+  /**
+   * Execute a script on targets
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} source - Script source (salt://, http://, or local path)
+   * @param {Object} [options] - Additional options
+   * @param {string} [options.args] - Arguments to pass to script
+   * @param {string} [options.shell] - Shell to use
+   * @param {number} [options.timeout] - Execution timeout
+   * @returns {Promise<Object>} Map of minion_id -> output
+   */
+  async script(target, source, options = {}) {
+    const {
+      args = '',
+      shell,
+      timeout = 120
+    } = options;
+
+    const kwarg = {
+      ...(shell && { shell }),
+      timeout
+    };
+
+    const arg = args ? [source, args] : [source];
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+
+    return this.run({
+      client: 'local',
+      fun: 'cmd.script',
+      tgt: target,
+      tgt_type,
+      arg,
+      kwarg,
+      timeout: (timeout + 10) * 1000
+    });
+  }
+
+  // ============================================================
+  // Convenience Methods - Service Management
+  // ============================================================
+
+  /**
+   * List all services on targets
+   * @param {string|string[]} target - Target pattern or list
+   * @returns {Promise<Object>} Map of minion_id -> service list
+   */
+  async serviceGetAll(target) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'service.get_all',
+      tgt: target,
+      tgt_type
+    });
+  }
+
+  /**
+   * Get status of a specific service
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} service - Service name
+   * @returns {Promise<Object>} Map of minion_id -> boolean
+   */
+  async serviceStatus(target, service) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'service.status',
+      tgt: target,
+      tgt_type,
+      arg: [service]
+    });
+  }
+
+  /**
+   * Start a service
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} service - Service name
+   * @returns {Promise<Object>} Result
+   */
+  async serviceStart(target, service) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'service.start',
+      tgt: target,
+      tgt_type,
+      arg: [service]
+    });
+  }
+
+  /**
+   * Stop a service
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} service - Service name
+   * @returns {Promise<Object>} Result
+   */
+  async serviceStop(target, service) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'service.stop',
+      tgt: target,
+      tgt_type,
+      arg: [service]
+    });
+  }
+
+  /**
+   * Restart a service
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} service - Service name
+   * @returns {Promise<Object>} Result
+   */
+  async serviceRestart(target, service) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'service.restart',
+      tgt: target,
+      tgt_type,
+      arg: [service]
+    });
+  }
+
+  /**
+   * Enable a service at boot
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} service - Service name
+   * @returns {Promise<Object>} Result
+   */
+  async serviceEnable(target, service) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'service.enable',
+      tgt: target,
+      tgt_type,
+      arg: [service]
+    });
+  }
+
+  /**
+   * Disable a service at boot
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} service - Service name
+   * @returns {Promise<Object>} Result
+   */
+  async serviceDisable(target, service) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'service.disable',
+      tgt: target,
+      tgt_type,
+      arg: [service]
+    });
+  }
+
+  // ============================================================
+  // Convenience Methods - Process Management
+  // ============================================================
+
+  /**
+   * List top processes
+   * @param {string|string[]} target - Target pattern or list
+   * @param {number} [numProcs=50] - Number of processes to return
+   * @returns {Promise<Object>} Map of minion_id -> process list
+   */
+  async psTop(target, numProcs = 50) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'ps.top',
+      tgt: target,
+      tgt_type,
+      kwarg: { num_processes: numProcs }
+    });
+  }
+
+  /**
+   * Kill a process by PID
+   * @param {string|string[]} target - Target pattern or list
+   * @param {number} pid - Process ID
+   * @param {number} [signal=15] - Signal to send (15=SIGTERM, 9=SIGKILL)
+   * @returns {Promise<Object>} Result
+   */
+  async psKill(target, pid, signal = 15) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'ps.kill_pid',
+      tgt: target,
+      tgt_type,
+      arg: [pid],
+      kwarg: { signal }
+    });
+  }
+
+  // ============================================================
+  // Convenience Methods - User Management
+  // ============================================================
+
+  /**
+   * List all users
+   * @param {string|string[]} target - Target pattern or list
+   * @returns {Promise<Object>} Map of minion_id -> user list
+   */
+  async userList(target) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'user.list_users',
+      tgt: target,
+      tgt_type
+    });
+  }
+
+  /**
+   * Get user info
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} username - Username
+   * @returns {Promise<Object>} Map of minion_id -> user info
+   */
+  async userInfo(target, username) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'user.info',
+      tgt: target,
+      tgt_type,
+      arg: [username]
+    });
+  }
+
+  // ============================================================
+  // Convenience Methods - Password Management
+  // ============================================================
+
+  /**
+   * Change password on Linux (using chpasswd)
+   * @param {string|string[]} target - Target Linux minions
+   * @param {string} username - Username
+   * @param {string} password - New password
+   * @returns {Promise<Object>} Result
+   */
+  async setPasswordLinux(target, username, password) {
+    // Use cmd.run with chpasswd for reliability
+    const command = `echo '${username}:${password}' | chpasswd`;
+    return this.cmd(target, command, { shell: '/bin/bash' });
+  }
+
+  /**
+   * Change password on Windows
+   * @param {string|string[]} target - Target Windows minions
+   * @param {string} username - Username
+   * @param {string} password - New password
+   * @returns {Promise<Object>} Result
+   */
+  async setPasswordWindows(target, username, password) {
+    // Use net user for compatibility, or PowerShell for local users
+    const command = `net user "${username}" "${password}"`;
+    return this.cmd(target, command, { shell: 'cmd' });
+  }
+
+  // ============================================================
+  // Convenience Methods - Network
+  // ============================================================
+
+  /**
+   * Get active TCP connections
+   * @param {string|string[]} target - Target pattern or list
+   * @returns {Promise<Object>} Map of minion_id -> connections
+   */
+  async networkConnections(target) {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    return this.run({
+      client: 'local',
+      fun: 'network.active_tcp',
+      tgt: target,
+      tgt_type
+    });
+  }
+
+  // ============================================================
+  // Convenience Methods - State Management
+  // ============================================================
+
+  /**
+   * Apply a Salt state
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} stateName - State to apply
+   * @param {Object} [options] - Additional options
+   * @param {boolean} [options.test=false] - Run in test mode (dry run)
+   * @returns {Promise<Object>} Map of minion_id -> state results
+   */
+  async stateApply(target, stateName, options = {}) {
+    const { test = false } = options;
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+
+    return this.run({
+      client: 'local',
+      fun: 'state.apply',
+      tgt: target,
+      tgt_type,
+      arg: [stateName],
+      kwarg: test ? { test: true } : {},
+      timeout: 600000 // States can take a while
+    });
+  }
+
+  /**
+   * Apply state from inline YAML content
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} stateContent - YAML state content
+   * @param {Object} [options] - Additional options
+   * @param {boolean} [options.test=false] - Run in test mode
+   * @returns {Promise<Object>} Map of minion_id -> state results
+   */
+  async stateTemplateStr(target, stateContent, options = {}) {
+    const { test = false } = options;
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+
+    return this.run({
+      client: 'local',
+      fun: 'state.template_str',
+      tgt: target,
+      tgt_type,
+      arg: [stateContent],
+      kwarg: test ? { test: true } : {},
+      timeout: 600000
+    });
+  }
+
+  // ============================================================
+  // Convenience Methods - File Operations
+  // ============================================================
+
+  /**
+   * Read a file from target
+   * @param {string} target - Single target (not pattern)
+   * @param {string} filePath - Path to file
+   * @returns {Promise<string>} File contents
+   */
+  async fileRead(target, filePath) {
+    const result = await this.run({
+      client: 'local',
+      fun: 'file.read',
+      tgt: target,
+      arg: [filePath]
+    });
+    return result[target];
+  }
+
+  /**
+   * Get file stats
+   * @param {string} target - Single target
+   * @param {string} filePath - Path to file
+   * @returns {Promise<Object>} File stats
+   */
+  async fileStats(target, filePath) {
+    const result = await this.run({
+      client: 'local',
+      fun: 'file.stats',
+      tgt: target,
+      arg: [filePath]
+    });
+    return result[target];
+  }
+
+  // ============================================================
+  // Async Job Management
+  // ============================================================
+
+  /**
+   * Submit an async job
+   * @param {Object} options - Same as run() options
+   * @returns {Promise<string>} Job ID (jid)
+   */
+  async runAsync(options) {
+    const result = await this.run({
+      ...options,
+      client: 'local_async'
+    });
+    return result?.jid;
+  }
+
+  /**
+   * Look up results of an async job
+   * @param {string} jid - Job ID
+   * @returns {Promise<Object>} Job results
+   */
+  async jobLookup(jid) {
+    return this.run({
+      client: 'runner',
+      fun: 'jobs.lookup_jid',
+      kwarg: { jid }
+    });
+  }
+
+  /**
+   * Check if Salt API is reachable
+   * @returns {Promise<boolean>} True if reachable
+   */
+  async testConnection() {
+    try {
+      await this.authenticate();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+// Export singleton instance and class
+const defaultClient = new SaltAPIClient();
+
+module.exports = {
+  SaltAPIClient,
+  client: defaultClient,
+  // Re-export commonly used methods bound to default client
+  ping: (...args) => defaultClient.ping(...args),
+  status: (...args) => defaultClient.status(...args),
+  cmd: (...args) => defaultClient.cmd(...args),
+  grains: (...args) => defaultClient.grains(...args),
+  listKeys: (...args) => defaultClient.listKeys(...args)
+};

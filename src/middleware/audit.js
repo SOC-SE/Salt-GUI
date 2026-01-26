@@ -130,7 +130,12 @@ function auditAllMutations(req, res, next) {
     const success = data.success !== false && res.statusCode < 400;
 
     // Build action name from method and path
-    const action = `${req.method.toLowerCase()}.${req.path.replace(/^\/api\//, '').replace(/\//g, '.')}`;
+    // Clean up path: remove /api/ prefix, leading/trailing slashes, then convert / to .
+    const cleanPath = req.path
+      .replace(/^\/api\//, '')  // Remove /api/ prefix
+      .replace(/^\/+|\/+$/g, '') // Remove leading/trailing slashes
+      .replace(/\//g, '.');     // Convert remaining slashes to dots
+    const action = `${req.method.toLowerCase()}.${cleanPath || 'root'}`;
 
     logger.audit({
       user: req.session?.user?.username || 'anonymous',

@@ -836,13 +836,17 @@
                     <label for="create-username">Username</label>
                     <input type="text" id="create-username" placeholder="e.g., blueadmin" required pattern="[a-z_][a-z0-9_-]*">
                   </div>
-                  <div class="form-group">
+                  <div class="form-group" id="create-shell-group">
                     <label for="create-shell">Shell</label>
                     <select id="create-shell">
                       <option value="/bin/bash">/bin/bash</option>
                       <option value="/bin/sh">/bin/sh</option>
                       <option value="/bin/zsh">/bin/zsh</option>
                     </select>
+                  </div>
+                  <div class="form-group hidden" id="create-shell-windows-notice">
+                    <label>Shell</label>
+                    <span class="text-muted">N/A for Windows</span>
                   </div>
                 </div>
                 <div class="form-row">

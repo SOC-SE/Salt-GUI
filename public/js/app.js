@@ -478,12 +478,15 @@
     }
     renderDeviceList();
     updateDeviceCounts();
+    // Update shell selector visibility for user creation
+    updateShellSelectorVisibility();
   }
 
   function selectAllDevices() {
     state.devices.forEach(d => state.selectedDevices.add(d.id));
     renderDeviceList();
     updateDeviceCounts();
+    updateShellSelectorVisibility();
   }
 
   function selectLinuxDevices() {
@@ -494,6 +497,7 @@
     });
     renderDeviceList();
     updateDeviceCounts();
+    updateShellSelectorVisibility();
   }
 
   function selectWindowsDevices() {
@@ -504,12 +508,14 @@
     });
     renderDeviceList();
     updateDeviceCounts();
+    updateShellSelectorVisibility();
   }
 
   function clearDeviceSelection() {
     state.selectedDevices.clear();
     renderDeviceList();
     updateDeviceCounts();
+    updateShellSelectorVisibility();
   }
 
   function updateDeviceCounts() {
@@ -579,6 +585,8 @@
         if (state.currentView === 'devices') {
           renderDeviceList();
         }
+        // Update shell selector visibility for user creation
+        updateShellSelectorVisibility();
       });
     });
 
@@ -2832,6 +2840,49 @@
     return targets;
   }
 
+  // Update shell selector visibility based on target OS
+  function updateShellSelectorVisibility() {
+    const targetType = document.getElementById('pwd-target-type').value;
+    const shellGroup = document.getElementById('create-shell-group');
+    const windowsNotice = document.getElementById('create-shell-windows-notice');
+
+    if (!shellGroup || !windowsNotice) return;
+
+    let allWindows = false;
+    let hasTargets = false;
+
+    if (targetType === 'selected') {
+      if (state.selectedDevices.size > 0) {
+        hasTargets = true;
+        // Check if all selected devices are Windows
+        allWindows = Array.from(state.selectedDevices).every(id => {
+          const device = state.devices.find(d => d.id === id);
+          return device && device.kernel === 'Windows';
+        });
+      }
+    } else if (targetType === 'single') {
+      const target = document.getElementById('pwd-single-target').value;
+      if (target) {
+        hasTargets = true;
+        const device = state.devices.find(d => d.id === target);
+        allWindows = device && device.kernel === 'Windows';
+      }
+    } else if (targetType === 'all') {
+      hasTargets = state.devices.length > 0;
+      // Check if all devices are Windows
+      allWindows = state.devices.length > 0 && state.devices.every(d => d.kernel === 'Windows');
+    }
+    // For custom pattern, we can't easily determine OS, so show shell selector
+
+    if (hasTargets && allWindows) {
+      shellGroup.classList.add('hidden');
+      windowsNotice.classList.remove('hidden');
+    } else {
+      shellGroup.classList.remove('hidden');
+      windowsNotice.classList.add('hidden');
+    }
+  }
+
   // Toggle create user panel
   function toggleCreateUserPanel() {
     const panel = document.getElementById('create-user-panel');
@@ -3402,13 +3453,17 @@
       document.getElementById('pwd-custom-target').classList.toggle('hidden', e.target.value !== 'custom');
       document.getElementById('pwd-single-target').classList.toggle('hidden', e.target.value !== 'single');
       toggleInlineSelectorVisibility('pwd', 'pwd-target-type', 'selected');
+      updateShellSelectorVisibility();
     });
 
+    // User Management - Single device selection change
+    document.getElementById('pwd-single-target').addEventListener('change', updateShellSelectorVisibility);
+
     // User Management - Inline device selector
-    document.getElementById('pwd-select-all').addEventListener('click', () => inlineSelectorSelectAll('pwd'));
-    document.getElementById('pwd-select-linux').addEventListener('click', () => inlineSelectorSelectLinux('pwd'));
-    document.getElementById('pwd-select-windows').addEventListener('click', () => inlineSelectorSelectWindows('pwd'));
-    document.getElementById('pwd-select-none').addEventListener('click', () => inlineSelectorSelectNone('pwd'));
+    document.getElementById('pwd-select-all').addEventListener('click', () => { inlineSelectorSelectAll('pwd'); updateShellSelectorVisibility(); });
+    document.getElementById('pwd-select-linux').addEventListener('click', () => { inlineSelectorSelectLinux('pwd'); updateShellSelectorVisibility(); });
+    document.getElementById('pwd-select-windows').addEventListener('click', () => { inlineSelectorSelectWindows('pwd'); updateShellSelectorVisibility(); });
+    document.getElementById('pwd-select-none').addEventListener('click', () => { inlineSelectorSelectNone('pwd'); updateShellSelectorVisibility(); });
 
     // Keys
     document.getElementById('refresh-keys-btn').addEventListener('click', loadKeys);

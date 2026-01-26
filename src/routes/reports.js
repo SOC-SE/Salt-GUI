@@ -34,11 +34,12 @@ router.get('/status', auditAction('reports.status'), async (req, res) => {
     const accepted = keys.minions || [];
 
     // Ping all minions to get status
+    // Note: timeout is for the HTTP request, not passed to the Salt function
     const pingResult = await saltClient.run({
       client: 'local',
       tgt: '*',
       fun: 'test.ping',
-      kwarg: { timeout: 10 }
+      timeout: 15000  // 15 second HTTP timeout
     });
 
     // Get grains for all minions
@@ -46,7 +47,7 @@ router.get('/status', auditAction('reports.status'), async (req, res) => {
       client: 'local',
       tgt: '*',
       fun: 'grains.items',
-      kwarg: { timeout: 30 }
+      timeout: 60000  // 60 second HTTP timeout for grains
     });
 
     const minions = [];
@@ -212,7 +213,7 @@ router.post('/security', auditAction('reports.security'), async (req, res) => {
       const kernel = grainsResult[target]?.kernel || 'Linux';
       findings[target].kernel = kernel;
 
-      // Quick security checks (simplified version)
+      // Quick security checks based on OS
       if (kernel === 'Linux') {
         // Check for UID 0 users
         const uidCheck = await saltClient.run({
@@ -230,7 +231,6 @@ router.post('/security', auditAction('reports.security'), async (req, res) => {
             finding: 'Non-root users with UID 0',
             details: uidCheck[target].trim()
           });
-          totalCritical++;
         }
 
         // Check for SUID in temp
@@ -249,7 +249,90 @@ router.post('/security', auditAction('reports.security'), async (req, res) => {
             finding: 'SUID binaries in temp directories',
             details: suidCheck[target].trim()
           });
-          totalCritical++;
+        }
+      } else if (kernel === 'Windows') {
+        // Windows security checks
+
+        // Check if Guest account is enabled
+        const guestCheck = await saltClient.run({
+          client: 'local',
+          tgt: target,
+          fun: 'cmd.run',
+          arg: ['(Get-LocalUser -Name Guest -ErrorAction SilentlyContinue).Enabled'],
+          kwarg: { shell: 'powershell', timeout: 30 }
+        });
+
+        if (guestCheck[target]?.trim() === 'True') {
+          findings[target].findings.push({
+            severity: 'high',
+            category: 'Users',
+            finding: 'Guest account is enabled',
+            details: 'The Guest account should be disabled for security'
+          });
+        }
+
+        // Check if Windows Firewall is disabled on any profile
+        const fwCheck = await saltClient.run({
+          client: 'local',
+          tgt: target,
+          fun: 'cmd.run',
+          arg: ['Get-NetFirewallProfile | Where-Object {$_.Enabled -eq $false} | Select-Object -ExpandProperty Name'],
+          kwarg: { shell: 'powershell', timeout: 30 }
+        });
+
+        if (fwCheck[target]?.trim()) {
+          findings[target].findings.push({
+            severity: 'critical',
+            category: 'Firewall',
+            finding: 'Windows Firewall disabled',
+            details: `Firewall disabled on: ${fwCheck[target].trim().replace(/\n/g, ', ')}`
+          });
+        }
+
+        // Check if RDP is enabled
+        const rdpCheck = await saltClient.run({
+          client: 'local',
+          tgt: target,
+          fun: 'cmd.run',
+          arg: ['(Get-ItemProperty "HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server").fDenyTSConnections'],
+          kwarg: { shell: 'powershell', timeout: 30 }
+        });
+
+        if (rdpCheck[target]?.trim() === '0') {
+          findings[target].findings.push({
+            severity: 'medium',
+            category: 'Remote Access',
+            finding: 'Remote Desktop is enabled',
+            details: 'RDP is enabled - ensure it is properly secured'
+          });
+        }
+
+        // Check for unquoted service paths (privilege escalation vector)
+        // Use cmd.powershell for complex PowerShell pipelines
+        const unquotedCheck = await saltClient.run({
+          client: 'local',
+          tgt: target,
+          fun: 'cmd.powershell',
+          arg: ["Get-CimInstance Win32_Service | Where-Object { ($_.PathName -notlike '\"*') -and ($_.PathName -like '* *') } | Select-Object -First 5 -ExpandProperty Name"],
+          kwarg: { timeout: 60 }
+        });
+
+        // cmd.powershell returns an array, check if it has results
+        const unquotedResult = unquotedCheck[target];
+        if (unquotedResult && Array.isArray(unquotedResult) && unquotedResult.length > 0) {
+          findings[target].findings.push({
+            severity: 'high',
+            category: 'Services',
+            finding: 'Unquoted service paths found',
+            details: unquotedResult.join(', ')
+          });
+        } else if (unquotedResult && typeof unquotedResult === 'string' && unquotedResult.trim()) {
+          findings[target].findings.push({
+            severity: 'high',
+            category: 'Services',
+            finding: 'Unquoted service paths found',
+            details: unquotedResult.trim().replace(/\n/g, ', ')
+          });
         }
       }
 

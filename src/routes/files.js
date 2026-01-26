@@ -40,13 +40,16 @@ router.get('/:target/list', auditAction('files.list'), async (req, res) => {
     const kernel = await saltClient.getKernel(target);
 
     let command;
+    let shell;
     if (kernel === 'Windows') {
-      // Windows dir command - simpler approach
+      // Windows: Use PowerShell for detailed file info
       const winPath = path.replace(/\//g, '\\') || 'C:\\';
-      command = `cmd /c dir /b /a "${winPath}"`;
+      command = `Get-ChildItem -Path '${winPath}' -Force -ErrorAction SilentlyContinue | Select-Object Name,Length,Mode,PSIsContainer | ConvertTo-Json -Compress`;
+      shell = 'powershell';
     } else {
       // Linux ls command with detailed output
       command = `ls -la "${path}" 2>/dev/null | tail -n +2 | awk '{print $1 "|" $5 "|" $9}'`;
+      shell = '/bin/bash';
     }
 
     const result = await saltClient.run({
@@ -54,7 +57,7 @@ router.get('/:target/list', auditAction('files.list'), async (req, res) => {
       tgt: target,
       fun: 'cmd.run',
       arg: [command],
-      kwarg: { timeout: 30 }
+      kwarg: { shell, timeout: 30 }
     });
 
     const output = result[target];
@@ -71,23 +74,32 @@ router.get('/:target/list', auditAction('files.list'), async (req, res) => {
 
     // Parse the output
     const files = [];
-    const lines = output.split('\n').filter(l => l.trim());
 
     if (kernel === 'Windows') {
-      // Windows dir /b output - just filenames
-      // Need another call to determine file vs directory
-      for (const name of lines) {
-        if (name && name !== '.' && name !== '..') {
-          files.push({
-            name: name.trim(),
-            type: 'unknown', // Would need stat call to determine
-            size: 0,
-            permissions: ''
-          });
+      // Windows: Parse PowerShell JSON output
+      try {
+        let parsed = JSON.parse(output);
+        // Handle single item (not array) case
+        if (!Array.isArray(parsed)) {
+          parsed = [parsed];
         }
+        for (const item of parsed) {
+          if (item && item.Name) {
+            files.push({
+              name: item.Name,
+              type: item.PSIsContainer ? 'directory' : 'file',
+              size: item.Length || 0,
+              permissions: item.Mode || ''
+            });
+          }
+        }
+      } catch (parseErr) {
+        // Fallback: if JSON parse fails, treat as empty or error
+        logger.warn('Failed to parse Windows file list', parseErr);
       }
     } else {
       // Linux ls -la output
+      const lines = output.split('\n').filter(l => l.trim());
       for (const line of lines) {
         const parts = line.split('|');
         if (parts.length >= 3) {

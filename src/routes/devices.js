@@ -69,6 +69,14 @@ router.get('/', async (req, res) => {
           Array.from(upMinions),
           ['os', 'os_family', 'kernel', 'ipv4', 'fqdn', 'cpu_model', 'mem_total']
         );
+        // Populate kernel cache for faster subsequent requests
+        const kernelData = {};
+        for (const [minionId, grains] of Object.entries(grainsData)) {
+          if (grains?.kernel) {
+            kernelData[minionId] = { kernel: grains.kernel };
+          }
+        }
+        saltClient.populateKernelCache(kernelData);
       } catch (err) {
         logger.warn('Failed to fetch grains', { error: err.message });
       }
@@ -79,9 +87,18 @@ router.get('/', async (req, res) => {
       const isOnline = upMinions.has(minionId);
       const grains = grainsData[minionId] || {};
 
-      // Extract primary IP (exclude localhost)
+      // Extract primary IP with smart selection
+      // Priority: 1) Private network IPs (192.168.x, 172.16-31.x), 2) Other non-NAT IPs, 3) NAT IPs
       const ipv4 = grains.ipv4 || [];
-      const primaryIp = ipv4.find(ip => ip !== '127.0.0.1') || ipv4[0] || 'unknown';
+      const validIps = ipv4.filter(ip => ip !== '127.0.0.1');
+
+      // Prefer 192.168.x.x or 172.16-31.x.x (typical private networks)
+      // Deprioritize 10.0.2.x (VirtualBox NAT) and other 10.x.x.x ranges
+      const preferredIp = validIps.find(ip =>
+        ip.startsWith('192.168.') || /^172\.(1[6-9]|2[0-9]|3[01])\./.test(ip)
+      );
+      const fallbackIp = validIps.find(ip => !ip.startsWith('10.0.2.'));
+      const primaryIp = preferredIp || fallbackIp || validIps[0] || 'unknown';
 
       return {
         id: minionId,

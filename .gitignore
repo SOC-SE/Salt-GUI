@@ -46,3 +46,10 @@ uploads/
 
 # Session data
 sessions/
+
+# Vagrant
+.vagrant/
+Vagrantfile
+
+# Claude Code
+.claude/

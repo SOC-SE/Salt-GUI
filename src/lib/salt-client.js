@@ -27,6 +27,10 @@ class SaltAPIClient {
    * @param {boolean} [options.verify_ssl] - Verify SSL certificates
    */
   constructor(options = {}) {
+    // Cache for minion kernel types (minion_id -> kernel)
+    this.kernelCache = new Map();
+    this.kernelCacheTimeout = 5 * 60 * 1000; // 5 minutes
+    this.kernelCacheTimestamps = new Map();
     this.reload(options);
   }
 
@@ -113,6 +117,8 @@ class SaltAPIClient {
 
   /**
    * Execute a Salt API request
+   * Uses direct credential passing instead of token-based auth for better compatibility
+   * with sharedsecret authentication.
    * @param {Object} options - Request options
    * @param {string} options.client - Salt client (local, wheel, runner, local_async)
    * @param {string} options.fun - Salt function to call
@@ -124,8 +130,6 @@ class SaltAPIClient {
    * @returns {Promise<Object>} Salt API response
    */
   async run(options) {
-    await this.ensureAuthenticated();
-
     const {
       client,
       fun,
@@ -136,9 +140,13 @@ class SaltAPIClient {
       timeout = this.defaultTimeout
     } = options;
 
+    // Include credentials directly in payload instead of using token
     const payload = {
       client,
       fun,
+      username: this.username,
+      password: this.password,
+      eauth: this.eauth,
       ...(tgt !== undefined && { tgt }),
       ...(tgt !== undefined && { tgt_type }),
       ...(arg.length > 0 && { arg }),
@@ -149,28 +157,21 @@ class SaltAPIClient {
 
     try {
       const response = await this.client.post('/run', payload, {
-        headers: { 'X-Auth-Token': this.token },
         timeout
       });
 
-      return response.data.return?.[0] || {};
-    } catch (error) {
-      // Handle token expiry
-      if (error.response?.status === 401) {
-        logger.warn('Token expired, re-authenticating');
-        this.token = null;
-        await this.ensureAuthenticated();
+      const result = response.data.return?.[0];
 
-        // Retry the request once
-        const response = await this.client.post('/run', payload, {
-          headers: { 'X-Auth-Token': this.token },
-          timeout
-        });
-        return response.data.return?.[0] || {};
+      // Wheel and runner clients return data in a nested format when using direct credentials
+      // Format: {"return": [{"tag": "...", "data": {"return": {...actual data...}}}]}
+      if (result?.data?.return !== undefined) {
+        return result.data.return;
       }
 
+      return result || {};
+    } catch (error) {
       const message = error.response?.data?.return?.[0] || error.message;
-      logger.error(`Salt API error: ${fun}`, { message });
+      logger.error(`Salt API error: ${fun}`, { message, status: error.response?.status });
       throw new Error(`Salt API error: ${message}`);
     }
   }
@@ -205,6 +206,53 @@ class SaltAPIClient {
       up: result?.up || [],
       down: result?.down || []
     };
+  }
+
+  /**
+   * Get kernel type for a minion (with caching)
+   * @param {string} target - Minion ID
+   * @returns {Promise<string>} Kernel type ('Linux' or 'Windows')
+   */
+  async getKernel(target) {
+    const now = Date.now();
+    const cacheTimestamp = this.kernelCacheTimestamps.get(target) || 0;
+
+    // Return cached value if still valid
+    if (this.kernelCache.has(target) && (now - cacheTimestamp) < this.kernelCacheTimeout) {
+      return this.kernelCache.get(target);
+    }
+
+    // Fetch kernel from grains
+    try {
+      const result = await this.run({
+        client: 'local',
+        tgt: target,
+        fun: 'grains.item',
+        arg: ['kernel']
+      });
+
+      const kernel = result[target]?.kernel || 'Linux';
+      this.kernelCache.set(target, kernel);
+      this.kernelCacheTimestamps.set(target, now);
+      return kernel;
+    } catch (error) {
+      logger.warn(`Failed to get kernel for ${target}, assuming Linux`);
+      return 'Linux';
+    }
+  }
+
+  /**
+   * Pre-populate kernel cache from devices data
+   * @param {Object} devicesData - Map of minion_id -> device info with kernel
+   */
+  populateKernelCache(devicesData) {
+    const now = Date.now();
+    for (const [minionId, data] of Object.entries(devicesData)) {
+      if (data.kernel) {
+        this.kernelCache.set(minionId, data.kernel);
+        this.kernelCacheTimestamps.set(minionId, now);
+      }
+    }
   }
 
   /**
@@ -254,10 +302,12 @@ class SaltAPIClient {
    * @returns {Promise<Object>} Map of minion_id -> grains
    */
   async grains(target = '*') {
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
     return this.run({
       client: 'local',
       fun: 'grains.items',
-      tgt: target
+      tgt: target,
+      tgt_type
     });
   }
 
@@ -269,10 +319,12 @@ class SaltAPIClient {
    */
   async grainsItem(target, items) {
     const arg = Array.isArray(items) ? items : [items];
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
     return this.run({
       client: 'local',
       fun: 'grains.item',
       tgt: target,
+      tgt_type,
       arg
     });
   }
@@ -386,6 +438,58 @@ class SaltAPIClient {
       tgt: target,
       tgt_type,
       arg,
+      kwarg,
+      timeout: (timeout + 10) * 1000
+    });
+  }
+
+  /**
+   * Execute script content directly on targets
+   * Uses cmd.run with the script content for inline execution
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} content - Script content to execute
+   * @param {Object} [options] - Additional options
+   * @param {string} [options.shell] - Shell to use (/bin/bash, powershell, cmd)
+   * @param {string} [options.args] - Arguments to pass
+   * @param {number} [options.timeout] - Execution timeout in seconds
+   * @param {string} [options.runas] - User to run as
+   * @returns {Promise<Object>} Map of minion_id -> output
+   */
+  async scriptContent(target, content, options = {}) {
+    const {
+      shell = '/bin/bash',
+      args = '',
+      timeout = 120,
+      runas
+    } = options;
+
+    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+
+    // For bash/sh, we can use a heredoc-style approach via cmd.run
+    // For PowerShell, we encode and execute
+    let command;
+    if (shell === 'powershell' || shell === 'powershell.exe') {
+      // PowerShell: encode the script as base64 and execute
+      const encoded = Buffer.from(content, 'utf16le').toString('base64');
+      command = `powershell -EncodedCommand ${encoded}`;
+    } else {
+      // Bash/sh: execute script content directly
+      // Use printf to safely pass the script content
+      command = content;
+    }
+
+    const kwarg = {
+      shell,
+      timeout,
+      ...(runas && { runas })
+    };
+
+    return this.run({
+      client: 'local',
+      fun: 'cmd.run',
+      tgt: target,
+      tgt_type,
+      arg: [command],
       kwarg,
       timeout: (timeout + 10) * 1000
     });
@@ -754,12 +858,17 @@ class SaltAPIClient {
   }
 
   /**
-   * Check if Salt API is reachable
-   * @returns {Promise<boolean>} True if reachable
+   * Check if Salt API is reachable and credentials are valid
+   * @returns {Promise<boolean>} True if reachable and authenticated
    */
   async testConnection() {
     try {
-      await this.authenticate();
+      // Use a simple wheel call to test connection and auth
+      await this.run({
+        client: 'wheel',
+        fun: 'key.list_all',
+        timeout: 10000
+      });
       return true;
     } catch {
       return false;

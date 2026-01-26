@@ -33,7 +33,14 @@ const servicesRoutes = require('./src/routes/services');
 const processesRoutes = require('./src/routes/processes');
 const passwordsRoutes = require('./src/routes/passwords');
 const statesRoutes = require('./src/routes/states');
+const playbooksRoutes = require('./src/routes/playbooks');
 const emergencyRoutes = require('./src/routes/emergency');
+const usersRoutes = require('./src/routes/users');
+const networkRoutes = require('./src/routes/network');
+const filesRoutes = require('./src/routes/files');
+const logsRoutes = require('./src/routes/logs');
+const suspiciousRoutes = require('./src/routes/suspicious');
+const reportsRoutes = require('./src/routes/reports');
 
 // Initialize Express
 const app = express();
@@ -168,11 +175,32 @@ app.use('/api/processes', processesRoutes);
 // Password management routes
 app.use('/api/passwords', passwordsRoutes);
 
+// User management routes
+app.use('/api/users', usersRoutes);
+
 // State management routes
 app.use('/api/states', statesRoutes);
 
+// Playbook automation routes
+app.use('/api/playbooks', playbooksRoutes);
+
 // Emergency action routes
 app.use('/api/emergency', emergencyRoutes);
+
+// Network connection routes
+app.use('/api/network', networkRoutes);
+
+// File browser routes
+app.use('/api/files', filesRoutes);
+
+// Log viewer routes
+app.use('/api/logs', logsRoutes);
+
+// Suspicious items scanner routes
+app.use('/api/suspicious', suspiciousRoutes);
+
+// Reports routes
+app.use('/api/reports', reportsRoutes);
 
 // ============================================================
 // Error Handling
@@ -250,7 +278,14 @@ const server = app.listen(PORT, HOST, () => {
   console.log('    GET  /api/processes/:target- List processes');
   console.log('    POST /api/processes/kill   - Kill processes');
   console.log('    POST /api/passwords/change - Change passwords');
+  console.log('    POST /api/users/list       - List users');
+  console.log('    POST /api/users/create     - Create user');
+  console.log('    POST /api/users/disable    - Disable user');
+  console.log('    POST /api/users/enable     - Enable user');
+  console.log('    POST /api/users/sudo       - Manage sudo access');
   console.log('    POST /api/states/apply     - Apply Salt states');
+  console.log('    GET  /api/playbooks        - List playbooks');
+  console.log('    POST /api/playbooks/run    - Run playbook');
   console.log('    POST /api/emergency/*      - Emergency actions');
   console.log('    GET  /api/audit            - View audit log');
   console.log('');

@@ -442,10 +442,10 @@ router.post('/run', auditAction('script.run'), async (req, res) => {
   try {
     logger.info(`Executing script ${script} on ${targetValidation.targets.join(', ')}`);
 
-    // Execute script using Salt's cmd.script_retcode or by piping content
-    // We'll use cmd.run with the script content for simplicity and to avoid
-    // needing to serve the script file over HTTP
-    const result = await saltClient.script(
+    // Execute script content using cmd.run
+    // We use scriptContent instead of script because we have the content locally
+    // and don't want to require serving it over HTTP
+    const result = await saltClient.scriptContent(
       targetValidation.targets,
       scriptContent,
       {

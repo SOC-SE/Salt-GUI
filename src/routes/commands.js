@@ -58,6 +58,9 @@ function resolveShell(osKernel, requestedShell) {
   const kernel = (osKernel || '').toLowerCase();
 
   if (requestedShell) {
+    // Map short shell names to full paths
+    if (requestedShell === 'bash') return '/bin/bash';
+    if (requestedShell === 'sh') return '/bin/sh';
     return requestedShell;
   }
 
@@ -115,11 +118,14 @@ router.post('/run', auditAction('command.run'), async (req, res) => {
   try {
     logger.debug(`Executing command on ${targetValidation.targets.join(', ')}: ${command.substring(0, 100)}`);
 
+    // Resolve shell - map short names to full paths
+    const resolvedShell = resolveShell(null, shell);
+
     const result = await saltClient.cmd(
       targetValidation.targets,
       command,
       {
-        shell,
+        shell: resolvedShell,
         timeout: timeoutSec,
         cwd,
         runas
@@ -213,11 +219,14 @@ router.post('/run-all', auditAction('command.run_all'), async (req, res) => {
   const startTime = Date.now();
 
   try {
+    // Resolve shell - map short names to full paths
+    const resolvedShell = resolveShell(null, shell);
+
     const result = await saltClient.cmdAll(
       targetValidation.targets,
       command,
       {
-        shell,
+        shell: resolvedShell,
         timeout: timeoutSec,
         cwd,
         runas
@@ -305,6 +314,9 @@ router.post('/run-async', auditAction('command.run_async'), async (req, res) => 
   }
 
   try {
+    // Resolve shell - map short names to full paths
+    const resolvedShell = resolveShell(null, shell);
+
     const jid = await saltClient.runAsync({
       client: 'local_async',
       fun: 'cmd.run',
@@ -312,7 +324,7 @@ router.post('/run-async', auditAction('command.run_async'), async (req, res) => 
       tgt_type: targetValidation.targets.length > 1 ? 'list' : 'glob',
       arg: [command],
       kwarg: {
-        shell,
+        shell: resolvedShell,
         timeout: Math.min(parseInt(timeout, 10) || 30, 600)
       }
     });

@@ -37,6 +37,8 @@ states/windows/*
 playbooks/*.yaml
 !scripts/linux/.gitkeep
 !scripts/windows/.gitkeep
+!scripts/linux/install/
+!scripts/windows/install/
 !states/linux/.gitkeep
 !states/windows/.gitkeep
 !playbooks/.gitkeep

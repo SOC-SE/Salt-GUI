@@ -597,6 +597,34 @@ grains:
 EOF
 
     log_info "Minion configured to connect to localhost"
+
+    # Setup auditd for forensic monitoring
+    log_substep "Installing auditd for forensic watch rules..."
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y -qq auditd 2>/dev/null || true
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q audit 2>/dev/null || true
+    elif command -v yum &>/dev/null; then
+        yum install -y -q audit 2>/dev/null || true
+    fi
+    mkdir -p /etc/audit/rules.d
+    cat > /etc/audit/rules.d/saltgui-forensics.rules << 'AUDITRULES'
+-w /etc/passwd -p wa -k user_mod
+-w /etc/shadow -p wa -k user_mod
+-w /etc/sudoers -p wa -k sudo_mod
+-w /etc/ssh/sshd_config -p wa -k ssh_mod
+-w /etc/crontab -p wa -k cron_mod
+-w /etc/cron.d/ -p wa -k cron_mod
+-w /etc/pam.d/ -p wa -k pam_mod
+-w /etc/ld.so.preload -p wa -k preload_mod
+-w /etc/profile.d/ -p wa -k profile_mod
+-w /etc/systemd/system/ -p wa -k systemd_mod
+-a always,exit -F dir=/tmp -F perm=x -k tmp_exec
+-a always,exit -F dir=/dev/shm -F perm=x -k shm_exec
+AUDITRULES
+    systemctl enable auditd 2>/dev/null || true
+    systemctl restart auditd 2>/dev/null || true
+    log_info "Auditd configured with 12 forensic watch rules"
 }
 
 start_salt_services() {

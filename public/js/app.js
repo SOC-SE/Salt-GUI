@@ -419,6 +419,7 @@
         populateSingleDeviceSelects();
         populateForensicsTargetSelects();
         loadForensicsJobs();
+        renderForensicsDeviceChecklist();
         break;
     }
   }
@@ -3473,6 +3474,31 @@
     });
   }
 
+  function renderForensicsDeviceChecklist() {
+    const container = document.getElementById('fr-device-checklist');
+    const type = document.getElementById('fr-collect-target-type').value;
+    if (type !== 'selected') { container.classList.add('hidden'); return; }
+    container.classList.remove('hidden');
+    const devices = (state.devices || []).filter(d => d.status === 'online');
+    if (devices.length === 0) {
+      container.innerHTML = '<span style="color:var(--text-muted);">No online devices</span>';
+      return;
+    }
+    container.innerHTML = devices.map(d => {
+      const checked = state.selectedDevices.has(d.id) ? 'checked' : '';
+      return `<label style="display:block;cursor:pointer;padding:1px 0;"><input type="checkbox" class="fr-dev-cb" value="${escapeHtml(d.id)}" ${checked}> ${escapeHtml(d.id)} <span style="color:var(--text-muted);">${escapeHtml(d.os || '')}</span></label>`;
+    }).join('');
+    container.querySelectorAll('.fr-dev-cb').forEach(cb => {
+      cb.addEventListener('change', () => {
+        if (cb.checked) state.selectedDevices.add(cb.value);
+        else state.selectedDevices.delete(cb.value);
+        const infoEl = document.getElementById('fr-selected-info');
+        infoEl.textContent = `${state.selectedDevices.size} device(s) selected`;
+        infoEl.classList.remove('hidden');
+      });
+    });
+  }
+
   function getForensicsCollectTargets() {
     const type = document.getElementById('fr-collect-target-type').value;
     if (type === 'all') return '*';
@@ -3619,6 +3645,7 @@
         }
         const elapsed = result.elapsed_ms ? ` (${Math.round(result.elapsed_ms / 1000)}s)` : '';
         outputEl.textContent = `Job ${jobId}: ${status}${elapsed}`;
+        loadForensicsJobs();
         setTimeout(poll, 3000);
       } catch (err) {
         outputEl.textContent = `Poll error: ${err.message}`;
@@ -4098,92 +4125,96 @@
     }
   }
 
-  async function loadAuditTimeline() {
-    const target = forensicsBrowseState.selectedMinion;
-    if (!target) { showToast('Select a collection first', 'error'); return; }
-    const limit = parseInt(document.getElementById('fr-timeline-limit').value) || 100;
-    const listEl = document.getElementById('fr-timeline-list');
-    listEl.innerHTML = '<div class="loading">Loading audit log...</div>';
-
-    try {
-      const result = await api('/api/commands/run', {
-        method: 'POST',
-        body: JSON.stringify({
-          targets: [target],
-          command: `ausearch -ts recent --format text 2>/dev/null | tail -${limit} || journalctl -u auditd --no-pager -n ${limit} 2>/dev/null || echo 'No audit log available'`,
-          shell: 'bash',
-          timeout: 30
-        })
-      });
-      if (result.success && result.results) {
-        const output = result.results[target] || result.results[Object.keys(result.results)[0]] || {};
-        const text = typeof output === 'string' ? output : (output.stdout || '');
-        if (text && text.trim()) {
-          const lines = text.split('\n').filter(l => l.trim());
-          listEl.innerHTML = lines.map(l => `<div class="forensics-timeline-item"><span>${escapeHtml(l)}</span></div>`).join('');
-        } else {
-          listEl.innerHTML = '<div class="loading">No audit log data</div>';
-        }
-      }
-    } catch (error) {
-      listEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
-    }
-  }
-
-  async function enableAuditWatches() {
-    const target = forensicsBrowseState.selectedMinion;
-    if (!target) { showToast('Select a collection first', 'error'); return; }
-
-    try {
-      const result = await api('/api/commands/run', {
-        method: 'POST',
-        body: JSON.stringify({
-          targets: [target],
-          command: `which auditctl >/dev/null 2>&1 && { auditctl -w /etc/passwd -p wa -k user_mod; auditctl -w /etc/shadow -p wa -k user_mod; auditctl -w /etc/crontab -p wa -k cron_mod; auditctl -w /etc/cron.d -p wa -k cron_mod; auditctl -w /etc/ssh/sshd_config -p wa -k ssh_mod; auditctl -w /etc/sudoers -p wa -k sudo_mod; echo 'Audit watches enabled'; } || echo 'auditctl not found - install auditd first'`,
-          shell: 'bash',
-          timeout: 15
-        })
-      });
-      if (result.success && result.results) {
-        const output = result.results[target] || result.results[Object.keys(result.results)[0]] || {};
-        const text = typeof output === 'string' ? output : (output.stdout || '');
-        showToast(text.includes('enabled') ? 'Audit watches enabled' : (text || 'Done'), text.includes('enabled') ? 'success' : 'warning');
-      }
-    } catch (error) {
-      showToast(`Error: ${error.message}`, 'error');
-    }
-  }
-
   async function loadForensicsTimeline() {
     const target = forensicsBrowseState.selectedMinion;
     if (!target) { showToast('Select a collection first', 'error'); return; }
     const limit = parseInt(document.getElementById('fr-timeline-limit').value) || 100;
     const listEl = document.getElementById('fr-timeline-list');
-    listEl.innerHTML = '<div class="loading">Loading timeline...</div>';
+    listEl.innerHTML = '<div class="loading">Loading unified timeline (filesystem + audit)...</div>';
 
     try {
-      const result = await api(`/api/forensics/timeline/${encodeURIComponent(target)}?limit=${limit}`);
-      if (result.success) {
-        // timeline is a flat array from the backend
-        const entries = Array.isArray(result.timeline) ? result.timeline :
-          (result.timeline[target] || result.timeline[Object.keys(result.timeline)[0]] || []);
-        if (entries.length === 0) {
-          listEl.innerHTML = `<div class="loading">${escapeHtml(result.message || 'No timeline data')}</div>`;
-          return;
-        }
-        listEl.innerHTML = `<div class="forensics-timeline-header"><span>Modified</span><span>Mode</span><span>Owner</span><span>Size</span><span>Path</span></div>` +
-          entries.map(e => {
-            const mtime = e.mtime ? new Date(e.mtime).toLocaleString() : '';
-            return `
-            <div class="forensics-timeline-item">
-              <span>${escapeHtml(mtime)}</span>
-              <span>${escapeHtml(String(e.mode || ''))}</span>
-              <span>${escapeHtml(String(e.uid || ''))}</span>
-              <span>${formatBytes(parseInt(e.size) || 0)}</span>
-              <span>${escapeHtml(e.path || '')}</span>
-            </div>`;
-          }).join('');
+      // Run both filesystem find and ausearch in a single command
+      const halfLimit = Math.ceil(limit / 2);
+      const cmd = [
+        `echo '===FS_START==='`,
+        `find /tmp/forensics/ /var/log/ /etc/ -maxdepth 2 -type f -printf '%T@ %m %u %s %p\\n' 2>/dev/null | sort -rn | head -${halfLimit}`,
+        `echo '===AUDIT_START==='`,
+        `ausearch -ts recent -i 2>/dev/null | head -${halfLimit} || echo ''`
+      ].join('; ');
+
+      const result = await api('/api/commands/run', {
+        method: 'POST',
+        body: JSON.stringify({ targets: [target], command: cmd, shell: 'bash', timeout: 60 })
+      });
+
+      if (!result.success || !result.results) {
+        listEl.innerHTML = '<div class="loading">No data returned</div>';
+        return;
       }
+
+      const output = result.results[target] || result.results[Object.keys(result.results)[0]] || {};
+      const text = typeof output === 'string' ? output : (output.stdout || '');
+
+      const entries = [];
+
+      // Parse filesystem entries
+      const fsPart = text.split('===AUDIT_START===')[0].split('===FS_START===')[1] || '';
+      for (const line of fsPart.split('\n').filter(l => l.trim())) {
+        const parts = line.match(/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+        if (parts) {
+          entries.push({
+            timestamp: parseFloat(parts[1]) * 1000,
+            source: 'FS',
+            mode: parts[2],
+            uid: parts[3],
+            size: parts[4],
+            path: parts[5]
+          });
+        }
+      }
+
+      // Parse audit entries
+      const auditPart = text.split('===AUDIT_START===')[1] || '';
+      for (const line of auditPart.split('\n').filter(l => l.trim())) {
+        // Try to extract timestamp from audit line (e.g. "type=SYSCALL msg=audit(01/30/2026 14:30:00.123:456)" or epoch)
+        let ts = Date.now();
+        const tsMatch = line.match(/msg=audit\(([^)]+)\)/);
+        if (tsMatch) {
+          const parsed = Date.parse(tsMatch[1].split(':')[0]);
+          if (!isNaN(parsed)) ts = parsed;
+        }
+        entries.push({
+          timestamp: ts,
+          source: 'AUDIT',
+          mode: '',
+          uid: '',
+          size: '',
+          path: line.length > 120 ? line.substring(0, 120) + '...' : line
+        });
+      }
+
+      // Sort by timestamp descending
+      entries.sort((a, b) => b.timestamp - a.timestamp);
+
+      if (entries.length === 0) {
+        listEl.innerHTML = '<div class="loading">No timeline data</div>';
+        return;
+      }
+
+      listEl.innerHTML = `<div class="forensics-timeline-header"><span>Time</span><span>Source</span><span>Mode</span><span>Owner</span><span>Size</span><span>Path</span></div>` +
+        entries.slice(0, limit).map(e => {
+          const mtime = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
+          const srcClass = e.source === 'AUDIT' ? 'style="color:var(--status-warning);"' : '';
+          return `
+          <div class="forensics-timeline-item">
+            <span>${escapeHtml(mtime)}</span>
+            <span ${srcClass}>${escapeHtml(e.source)}</span>
+            <span>${escapeHtml(String(e.mode || ''))}</span>
+            <span>${escapeHtml(String(e.uid || ''))}</span>
+            <span>${e.size ? formatBytes(parseInt(e.size) || 0) : ''}</span>
+            <span>${escapeHtml(e.path || '')}</span>
+          </div>`;
+        }).join('');
     } catch (error) {
       listEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
     }
@@ -4435,11 +4466,12 @@
       const infoEl = document.getElementById('fr-selected-info');
       if (e.target.value === 'selected') {
         const count = state.selectedDevices.size;
-        infoEl.textContent = count > 0 ? `${count} device(s) selected from Devices page` : 'No devices selected — go to Devices page to select';
+        infoEl.textContent = count > 0 ? `${count} device(s) selected` : 'Select devices below';
         infoEl.classList.remove('hidden');
       } else {
         infoEl.classList.add('hidden');
       }
+      renderForensicsDeviceChecklist();
     });
     document.getElementById('fr-collect-copy-btn').addEventListener('click', () => {
       navigator.clipboard.writeText(document.getElementById('fr-collect-output').textContent);
@@ -4462,8 +4494,6 @@
     document.getElementById('fr-findings-severity').addEventListener('change', filterForensicsFindings);
     document.getElementById('fr-load-saved-btn').addEventListener('click', loadForensicsFindings);
     document.getElementById('fr-load-timeline-btn').addEventListener('click', loadForensicsTimeline);
-    document.getElementById('fr-load-audit-timeline-btn').addEventListener('click', loadAuditTimeline);
-    document.getElementById('fr-enable-audit-btn').addEventListener('click', enableAuditWatches);
     document.getElementById('fr-load-metadata-btn').addEventListener('click', loadForensicsMetadata);
     document.getElementById('fr-fullscreen-btn').addEventListener('click', () => {
       const fb = document.getElementById('fr-filebrowser');

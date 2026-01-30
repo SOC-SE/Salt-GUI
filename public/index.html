@@ -1038,6 +1038,7 @@
                     <option value="">Select device...</option>
                   </select>
                   <span id="fr-selected-info" class="hidden" style="color:var(--text-secondary);font-size:12px;"></span>
+                  <div id="fr-device-checklist" class="hidden" style="max-height:160px;overflow-y:auto;border:1px solid var(--border-color);padding:4px 8px;margin-top:4px;font-size:12px;"></div>
                 </div>
                 <div class="option-group">
                   <label>Level:</label>
@@ -1176,9 +1177,7 @@
                       <div class="option-group" style="display:inline-flex;margin-left:var(--spacing-md);">
                         <label>Limit:</label>
                         <input type="number" id="fr-timeline-limit" value="100" min="10" max="1000" style="width:80px;">
-                        <button id="fr-load-timeline-btn" class="btn btn-small">Load Filesystem</button>
-                        <button id="fr-load-audit-timeline-btn" class="btn btn-small">Load Audit Log</button>
-                        <button id="fr-enable-audit-btn" class="btn btn-small" title="Deploy auditd file-watch rules on the selected minion to track who modifies critical files. Rules persist until reboot or manual removal.">Enable Audit Watches</button>
+                        <button id="fr-load-timeline-btn" class="btn btn-small">Load Timeline</button>
                       </div>
                     </div>
                     <div id="fr-timeline-list" class="forensics-timeline-list">

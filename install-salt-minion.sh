@@ -248,6 +248,47 @@ install_salt_minion() {
     esac
 }
 
+setup_auditd() {
+    local pkg_mgr="$1"
+
+    log "Setting up auditd with forensic watch rules..."
+
+    case "$pkg_mgr" in
+        apt)
+            apt-get install -y -qq auditd audispd-plugins 2>/dev/null || apt-get install -y -qq auditd 2>/dev/null || true
+            ;;
+        dnf|yum)
+            $pkg_mgr install -y -q audit 2>/dev/null || true
+            ;;
+        apk)
+            apk add --quiet audit 2>/dev/null || true
+            ;;
+    esac
+
+    # Write persistent audit rules
+    mkdir -p /etc/audit/rules.d
+    cat > /etc/audit/rules.d/saltgui-forensics.rules << 'AUDITRULES'
+## Salt-GUI forensic watch rules
+-w /etc/passwd -p wa -k user_mod
+-w /etc/shadow -p wa -k user_mod
+-w /etc/sudoers -p wa -k sudo_mod
+-w /etc/ssh/sshd_config -p wa -k ssh_mod
+-w /etc/crontab -p wa -k cron_mod
+-w /etc/cron.d/ -p wa -k cron_mod
+-w /etc/pam.d/ -p wa -k pam_mod
+-w /etc/ld.so.preload -p wa -k preload_mod
+-w /etc/profile.d/ -p wa -k profile_mod
+-w /etc/systemd/system/ -p wa -k systemd_mod
+-a always,exit -F dir=/tmp -F perm=x -k tmp_exec
+-a always,exit -F dir=/dev/shm -F perm=x -k shm_exec
+AUDITRULES
+
+    # Enable and start auditd
+    systemctl enable auditd 2>/dev/null || true
+    systemctl restart auditd 2>/dev/null || true
+    log "Auditd configured with 12 forensic watch rules"
+}
+
 configure_minion() {
     local master_ip="$1"
     local minion_id="$2"
@@ -430,6 +471,9 @@ main() {
 
     # Install minion
     install_salt_minion "$pkg_mgr"
+
+    # Setup auditd for forensic monitoring
+    setup_auditd "$pkg_mgr"
 
     # Configure minion
     configure_minion "$SALT_MASTER_IP" "$MINION_ID"

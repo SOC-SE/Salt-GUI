@@ -3001,13 +3001,13 @@ label {
 .forensics-timeline-list {
   border: 1px solid var(--border-color);
   background: var(--bg-secondary);
-  max-height: 300px;
+  max-height: 600px;
   overflow-y: auto;
 }
 
 .forensics-timeline-item {
   display: grid;
-  grid-template-columns: 160px 90px 50px 60px 70px 1fr;
+  grid-template-columns: 160px 60px 60px 50px 60px 1fr;
   gap: var(--spacing-sm);
   padding: var(--spacing-xs) var(--spacing-md);
   border-bottom: 1px solid var(--border-color);
@@ -3029,7 +3029,7 @@ label {
 
 .forensics-timeline-header {
   display: grid;
-  grid-template-columns: 160px 90px 50px 60px 70px 1fr;
+  grid-template-columns: 160px 60px 60px 50px 60px 1fr;
   gap: var(--spacing-sm);
   padding: var(--spacing-xs) var(--spacing-md);
   background: var(--bg-tertiary);

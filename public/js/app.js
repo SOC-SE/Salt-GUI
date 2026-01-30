@@ -993,7 +993,8 @@
 
     // Add event listeners
     treeEl.querySelectorAll('.script-folder-name').forEach(el => {
-      el.addEventListener('click', () => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
         el.parentElement.classList.toggle('expanded');
       });
     });
@@ -1183,7 +1184,8 @@
 
     // Add event listeners
     treeEl.querySelectorAll('.script-folder-name').forEach(el => {
-      el.addEventListener('click', () => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
         el.parentElement.classList.toggle('expanded');
       });
     });
@@ -1369,7 +1371,8 @@
 
     // Add event listeners
     treeEl.querySelectorAll('.script-folder-name').forEach(el => {
-      el.addEventListener('click', () => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
         el.parentElement.classList.toggle('expanded');
       });
     });
@@ -3877,7 +3880,8 @@
           if (f.endsWith('/')) {
             if (!node.children[parts[i]]) node.children[parts[i]] = { name: parts[i], children: {}, files: [] };
           } else {
-            node.files.push({ name: parts[i], path: clean });
+            // Keep original path with ./ prefix for tar extraction
+            node.files.push({ name: parts[i], path: f.startsWith('./') ? f : './' + clean });
           }
         } else {
           if (!node.children[parts[i]]) node.children[parts[i]] = { name: parts[i], children: {}, files: [] };
@@ -3983,7 +3987,7 @@
   }
 
   async function forensicsCleanup() {
-    const age = parseInt(document.getElementById('fr-cleanup-age').value) || 24;
+    const age = parseFloat(document.getElementById('fr-cleanup-age').value) || 24;
     showConfirmModal('Cleanup Artifacts', `Delete forensic artifacts older than ${age} hours?`, async () => {
       try {
         const result = await api('/api/forensics/cleanup', {
@@ -4221,15 +4225,31 @@
 
   async function loadForensicsMetadata() {
     const target = forensicsBrowseState.selectedMinion;
-    if (!target) { showToast('Select a collection first', 'error'); return; }
+    const artifact = forensicsBrowseState.selectedArtifact;
+    if (!target || !artifact) { showToast('Select a collection first', 'error'); return; }
     const el = document.getElementById('fr-metadata-content');
     el.textContent = 'Loading...';
 
     try {
-      const result = await api(`/api/forensics/metadata/${encodeURIComponent(target)}`);
+      // Extract metadata.json from the selected tarball
+      const result = await api('/api/forensics/artifact-file', {
+        method: 'POST',
+        body: JSON.stringify({ target, artifact_path: artifact, file_path: './metadata.json' })
+      });
       if (result.success) {
-        const meta = result.metadata[target] || result.metadata[Object.keys(result.metadata)[0]] || {};
-        el.textContent = JSON.stringify(meta, null, 2);
+        let content = result.content;
+        if (typeof content === 'object' && content !== null) {
+          content = content[target] || content[Object.keys(content)[0]] || '';
+        }
+        // Try to pretty-print as JSON
+        try {
+          const parsed = JSON.parse(content);
+          el.textContent = JSON.stringify(parsed, null, 2);
+        } catch {
+          el.textContent = content || 'No metadata found in this collection';
+        }
+      } else {
+        el.textContent = 'No metadata.json found in this archive';
       }
     } catch (error) {
       el.textContent = `Error: ${error.message}`;

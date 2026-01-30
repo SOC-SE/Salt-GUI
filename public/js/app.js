@@ -3496,8 +3496,7 @@
       'debsums', 'aide', 'yara', 'volatility', 'volatility3',
       'clamav', 'clamscan', 'freshclam'
     ];
-    const cmd = toolsList.map(t => `printf "%-18s %s\\n" "${t}" "$(which ${t} 2>/dev/null && echo OK || echo MISSING)"`).join(' && ') +
-      ` && echo "" && INSTALLED=0 && MISSING="" && for t in ${toolsList.join(' ')}; do if which "$t" >/dev/null 2>&1; then INSTALLED=$((INSTALLED+1)); else MISSING="$MISSING $t"; fi; done && echo "Installed: $INSTALLED/${toolsList.length}" && if [ -n "$MISSING" ]; then echo "Missing:$MISSING"; fi`;
+    const cmd = `TOOLS="${toolsList.join(' ')}"; INSTALLED=0; MISSING=""; TOTAL=${toolsList.length}; for t in $TOOLS; do p=$(which "$t" 2>/dev/null); if [ -n "$p" ]; then printf "%-18s %-25s [INSTALLED]\\n" "$t" "$p"; INSTALLED=$((INSTALLED+1)); else printf "%-18s %-25s [NOT INSTALLED]\\n" "$t" "-"; MISSING="$MISSING $t"; fi; done; echo ""; echo "Installed: $INSTALLED/$TOTAL"; if [ -n "$MISSING" ]; then echo "Missing:$MISSING"; fi`;
 
     try {
       const result = await api('/api/commands/run', {

@@ -370,7 +370,11 @@ class SaltAPIClient {
       cwd
     } = options;
 
+    // Pass command via kwarg.cmd to avoid Salt misinterpreting '=' in
+    // the command string as keyword arguments when sent via arg array.
     const kwarg = {
+      cmd: command,
+      python_shell: true,
       ...(shell && { shell }),
       ...(runas && { runas }),
       ...(cwd && { cwd }),
@@ -386,7 +390,6 @@ class SaltAPIClient {
       fun: 'cmd.run',
       tgt: resolvedTarget,
       tgt_type,
-      arg: [command],
       kwarg,
       timeout: (timeout + 10) * 1000 // HTTP timeout slightly longer
     });

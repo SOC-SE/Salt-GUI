@@ -548,9 +548,263 @@ echo "Advanced collection complete"
 `;
 
   const comprehensiveSteps = `
-# Comprehensive extras
-${opts.skip_logs ? '' : 'cp /var/log/auth.log "$FDIR/auth.log" 2>/dev/null; cp /var/log/syslog "$FDIR/syslog.log" 2>/dev/null; cp /var/log/secure "$FDIR/secure.log" 2>/dev/null'}
-${opts.memory_dump ? 'cat /proc/meminfo > "$FDIR/meminfo.txt" 2>/dev/null; cat /proc/slabinfo > "$FDIR/slabinfo.txt" 2>/dev/null' : ''}
+# Comprehensive: full forensic collection (50+ categories)
+
+# --- Log collection ---
+${opts.skip_logs ? '' : `
+timeout 30 bash -c 'cp /var/log/auth.log "$FDIR/auth.log" 2>/dev/null; cp /var/log/syslog "$FDIR/syslog.log" 2>/dev/null; cp /var/log/secure "$FDIR/secure.log" 2>/dev/null'
+timeout 30 bash -c 'cp /var/log/kern.log "$FDIR/kern.log" 2>/dev/null; cp /var/log/daemon.log "$FDIR/daemon.log" 2>/dev/null'
+timeout 30 bash -c 'cp /var/log/dpkg.log "$FDIR/dpkg.log" 2>/dev/null; cp /var/log/apt/history.log "$FDIR/apt_history.log" 2>/dev/null'
+timeout 30 bash -c 'cp /var/log/salt/minion "$FDIR/salt_minion.log" 2>/dev/null'
+`}
+
+# --- Memory info ---
+${opts.memory_dump ? `
+timeout 30 bash -c 'cat /proc/meminfo > "$FDIR/meminfo.txt" 2>/dev/null; cat /proc/slabinfo > "$FDIR/slabinfo.txt" 2>/dev/null'
+timeout 30 bash -c 'cat /proc/buddyinfo > "$FDIR/buddyinfo.txt" 2>/dev/null; cat /proc/vmstat > "$FDIR/vmstat.txt" 2>/dev/null'
+` : ''}
+
+# --- File hashing (critical binaries) ---
+timeout 60 bash -c 'sha256sum /usr/bin/ssh /usr/bin/sudo /usr/bin/passwd /usr/sbin/sshd /usr/bin/login /usr/bin/su /usr/bin/crontab /usr/bin/at /usr/bin/wget /usr/bin/curl /usr/bin/nc /usr/bin/ncat /usr/bin/python3 /usr/bin/perl /usr/bin/whoami /usr/bin/id /bin/bash /bin/sh /usr/sbin/cron /usr/sbin/useradd /usr/sbin/usermod 2>/dev/null' > "$FDIR/file_hashes.txt"
+
+# --- Package verification ---
+timeout 120 bash -c 'if command -v debsums >/dev/null 2>&1; then debsums -c 2>/dev/null; elif command -v rpm >/dev/null 2>&1; then rpm -Va 2>/dev/null; fi' > "$FDIR/package_verify.txt"
+
+# --- LD_PRELOAD / library injection ---
+timeout 15 bash -c '{
+  echo "=== /etc/ld.so.preload ==="; cat /etc/ld.so.preload 2>/dev/null || echo "(not found)"
+  echo ""; echo "=== /etc/ld.so.conf.d/ ==="; ls -la /etc/ld.so.conf.d/ 2>/dev/null
+  for f in /etc/ld.so.conf.d/*; do echo "--- $f ---"; cat "$f" 2>/dev/null; done
+  echo ""; echo "=== LD_PRELOAD env ==="; grep -r LD_PRELOAD /etc/environment /etc/profile /etc/profile.d/ 2>/dev/null || echo "(none)"
+}' > "$FDIR/ld_preload.txt"
+
+# --- PAM config audit ---
+timeout 15 bash -c '{
+  echo "=== PAM configs ==="; ls -la /etc/pam.d/ 2>/dev/null
+  echo ""; echo "=== pam_exec.so usage ==="; grep -r pam_exec /etc/pam.d/ 2>/dev/null || echo "(none)"
+  echo ""; echo "=== suspicious PAM modules ==="; grep -rE "(pam_exec|pam_script|pam_permit)" /etc/pam.d/ 2>/dev/null || echo "(none)"
+}' > "$FDIR/pam_config.txt"
+
+# --- SSH key enumeration ---
+timeout 30 bash -c '{
+  echo "=== sshd_config ==="; cat /etc/ssh/sshd_config 2>/dev/null
+  echo ""; echo "=== sshd_config.d ==="; cat /etc/ssh/sshd_config.d/* 2>/dev/null
+  echo ""; echo "=== authorized_keys (all users) ===";
+  while IFS=: read -r user _ _ _ _ home _; do
+    [ -f "$home/.ssh/authorized_keys" ] && echo "--- $user ($home/.ssh/authorized_keys) ---" && cat "$home/.ssh/authorized_keys" 2>/dev/null
+    ls "$home/.ssh/id_*" 2>/dev/null | while read k; do echo "Private key: $k"; done
+  done < /etc/passwd
+}' > "$FDIR/ssh_keys.txt"
+
+# --- Systemd timer enumeration ---
+timeout 15 bash -c '{
+  echo "=== Active timers ==="; systemctl list-timers --all --no-pager 2>/dev/null
+  echo ""; echo "=== Custom timer files ==="; find /etc/systemd/system /usr/lib/systemd/system -name "*.timer" -ls 2>/dev/null
+}' > "$FDIR/systemd_timers.txt"
+
+# --- At jobs ---
+timeout 15 bash -c '{
+  echo "=== atq ==="; atq 2>/dev/null || echo "(at not available)"
+  echo ""; echo "=== /var/spool/at/ ==="; ls -la /var/spool/at/ 2>/dev/null
+  echo ""; echo "=== at job contents ==="; for f in /var/spool/at/[a-z]*; do echo "--- $f ---"; cat "$f" 2>/dev/null; done
+}' > "$FDIR/at_jobs.txt"
+
+# --- Init.d scripts ---
+timeout 15 bash -c '{
+  echo "=== init.d listing ==="; ls -la /etc/init.d/ 2>/dev/null
+  echo ""; echo "=== init.d script contents (first 10 lines each) ===";
+  for f in /etc/init.d/*; do echo "--- $f ---"; head -10 "$f" 2>/dev/null; done
+}' > "$FDIR/initd_scripts.txt"
+
+# --- RC local ---
+timeout 10 bash -c '{
+  echo "=== /etc/rc.local ==="; cat /etc/rc.local 2>/dev/null || echo "(not found)"
+  echo ""; echo "=== /etc/rc.d/rc.local ==="; cat /etc/rc.d/rc.local 2>/dev/null || echo "(not found)"
+}' > "$FDIR/rc_local.txt"
+
+# --- Profile.d enumeration ---
+timeout 15 bash -c '{
+  echo "=== /etc/profile.d/ listing ==="; ls -la /etc/profile.d/ 2>/dev/null
+  echo ""; echo "=== /etc/profile.d/ contents ===";
+  for f in /etc/profile.d/*.sh; do echo "--- $f ---"; cat "$f" 2>/dev/null; done
+}' > "$FDIR/profile_d.txt"
+
+# --- Bashrc/profile backdoor check ---
+timeout 30 bash -c '{
+  echo "=== /etc/bash.bashrc ==="; cat /etc/bash.bashrc 2>/dev/null
+  echo ""; echo "=== /etc/profile ==="; cat /etc/profile 2>/dev/null
+  echo ""; echo "=== User bashrc/profile ===";
+  while IFS=: read -r user _ _ _ _ home _; do
+    for rc in .bashrc .profile .bash_profile .bash_login .bash_logout; do
+      [ -f "$home/$rc" ] && echo "--- $user: $home/$rc ---" && cat "$home/$rc" 2>/dev/null
+    done
+  done < /etc/passwd
+}' > "$FDIR/bashrc_profiles.txt"
+
+# --- /proc per-process analysis (top 50 by CPU) ---
+timeout 60 bash -c '{
+  echo "=== Top 50 processes - detailed ===";
+  ps -eo pid --sort=-%cpu --no-headers | head -50 | while read pid; do
+    echo "--- PID $pid ---"
+    echo "exe: $(readlink /proc/$pid/exe 2>/dev/null)"
+    echo "cmdline: $(tr "\\0" " " < /proc/$pid/cmdline 2>/dev/null)"
+    echo "cwd: $(readlink /proc/$pid/cwd 2>/dev/null)"
+    echo "environ (key vars): $(tr "\\0" "\\n" < /proc/$pid/environ 2>/dev/null | grep -E "^(LD_|PATH=|HOME=|USER=)" )"
+    cat /proc/$pid/maps 2>/dev/null | head -5
+    echo ""
+  done
+}' > "$FDIR/proc_analysis.txt"
+
+# --- Deleted binaries running ---
+timeout 30 bash -c '{
+  echo "=== Deleted binaries still running ===";
+  ls -la /proc/*/exe 2>/dev/null | while read line; do
+    link=$(echo "$line" | awk "{print \\$NF}")
+    echo "$line" | grep -q "(deleted)" && echo "DELETED: $line"
+  done
+  # Alternative check
+  find /proc -maxdepth 2 -name exe -exec readlink {} \\; 2>/dev/null | grep "(deleted)"
+}' > "$FDIR/deleted_binaries.txt"
+
+# --- BPF/eBPF detection ---
+timeout 15 bash -c '{
+  echo "=== Raw sockets ==="; ss -0 2>/dev/null; cat /proc/net/raw 2>/dev/null
+  echo ""; echo "=== bpftool ==="; bpftool prog list 2>/dev/null || echo "(bpftool not available)"
+}' > "$FDIR/bpf_detection.txt"
+
+# --- Network namespaces ---
+timeout 10 bash -c 'ip netns list 2>/dev/null || echo "(none)"' > "$FDIR/net_namespaces.txt"
+
+# --- Container indicators ---
+timeout 10 bash -c '{
+  echo "=== Container checks ===";
+  [ -f /.dockerenv ] && echo "FOUND: /.dockerenv"
+  grep -q docker /proc/1/cgroup 2>/dev/null && echo "FOUND: docker in cgroup"
+  grep -q lxc /proc/1/cgroup 2>/dev/null && echo "FOUND: lxc in cgroup"
+  cat /proc/1/cgroup 2>/dev/null
+  echo ""; echo "=== Capabilities ==="; cat /proc/1/status 2>/dev/null | grep -i cap
+}' > "$FDIR/container_indicators.txt"
+
+# --- Webshell scanning ---
+timeout 60 bash -c '{
+  echo "=== Potential webshells ===";
+  find /var/www /srv/www /opt -type f \\( -name "*.php" -o -name "*.jsp" -o -name "*.asp" -o -name "*.aspx" \\) 2>/dev/null | while read f; do
+    grep -lE "(eval|exec|system|passthru|shell_exec|popen|proc_open|base64_decode|assert)" "$f" 2>/dev/null && echo "SUSPECT: $f"
+  done
+}' > "$FDIR/webshell_scan.txt"
+
+# --- Crypto miner indicators ---
+timeout 15 bash -c '{
+  echo "=== Crypto miner process check ===";
+  ps aux | grep -iE "(xmrig|minerd|stratum|cryptonight|hashrate|cpuminer|ethminer)" | grep -v grep
+  echo ""; echo "=== Suspicious CPU usage ===";
+  ps aux --sort=-%cpu | head -5
+}' > "$FDIR/crypto_miner.txt"
+
+# --- Capabilities audit ---
+timeout 60 bash -c 'getcap -r / 2>/dev/null' > "$FDIR/capabilities.txt"
+
+# --- Sudoers config ---
+timeout 15 bash -c '{
+  echo "=== /etc/sudoers ==="; cat /etc/sudoers 2>/dev/null
+  echo ""; echo "=== /etc/sudoers.d/ ==="; ls -la /etc/sudoers.d/ 2>/dev/null
+  for f in /etc/sudoers.d/*; do echo "--- $f ---"; cat "$f" 2>/dev/null; done
+}' > "$FDIR/sudoers.txt"
+
+# --- User shell histories (all users) ---
+timeout 30 bash -c '{
+  while IFS=: read -r user _ _ _ _ home _; do
+    for hist in .bash_history .zsh_history .sh_history; do
+      [ -f "$home/$hist" ] && echo "--- $user: $home/$hist ---" && tail -50 "$home/$hist" 2>/dev/null
+    done
+  done < /etc/passwd
+}' > "$FDIR/shell_histories.txt"
+
+# --- World-writable files in key directories ---
+timeout 30 bash -c 'find /etc /usr /var -type f -perm -o+w -ls 2>/dev/null | head -100' > "$FDIR/world_writable.txt"
+
+# --- Recently modified files (last 60 min) ---
+timeout 60 bash -c 'find /etc /usr/bin /usr/sbin /bin /sbin /var/spool /tmp -type f -mmin -60 -ls 2>/dev/null | head -200' > "$FDIR/recent_modified.txt"
+
+# --- Open file descriptors (lsof dump) ---
+timeout 30 bash -c 'lsof -nP 2>/dev/null | head -500' > "$FDIR/lsof_full.txt"
+
+# --- ARP cache + routing tables ---
+timeout 10 bash -c '{
+  echo "=== ARP cache ==="; arp -a 2>/dev/null || ip neigh 2>/dev/null
+  echo ""; echo "=== Routing tables ==="; ip route show table all 2>/dev/null
+}' > "$FDIR/arp_routes.txt"
+
+# --- Full firewall dump ---
+timeout 15 bash -c '{
+  echo "=== iptables-save ==="; iptables-save 2>/dev/null
+  echo ""; echo "=== nft list ruleset ==="; nft list ruleset 2>/dev/null
+  echo ""; echo "=== ufw status ==="; ufw status verbose 2>/dev/null
+}' > "$FDIR/firewall_full.txt"
+
+# --- SELinux/AppArmor status ---
+timeout 10 bash -c '{
+  echo "=== SELinux ==="; getenforce 2>/dev/null; sestatus 2>/dev/null
+  echo ""; echo "=== AppArmor ==="; aa-status 2>/dev/null; apparmor_status 2>/dev/null
+}' > "$FDIR/mac_status.txt"
+
+# --- Mounted filesystems + fstab ---
+timeout 10 bash -c '{
+  echo "=== mount ==="; mount
+  echo ""; echo "=== fstab ==="; cat /etc/fstab 2>/dev/null
+  echo ""; echo "=== df ==="; df -h
+}' > "$FDIR/mounts_fstab.txt"
+
+# --- Docker/Podman containers and images ---
+timeout 15 bash -c '{
+  echo "=== Docker containers ==="; docker ps -a 2>/dev/null
+  echo ""; echo "=== Docker images ==="; docker images 2>/dev/null
+  echo ""; echo "=== Podman containers ==="; podman ps -a 2>/dev/null
+  echo ""; echo "=== Podman images ==="; podman images 2>/dev/null
+}' > "$FDIR/docker_podman.txt"
+
+# --- Installed packages list ---
+timeout 30 bash -c '{
+  if command -v dpkg >/dev/null 2>&1; then dpkg -l; elif command -v rpm >/dev/null 2>&1; then rpm -qa | sort; fi
+}' > "$FDIR/installed_packages.txt"
+
+# --- Failed login attempts ---
+timeout 15 bash -c 'lastb 2>/dev/null | head -100' > "$FDIR/failed_logins.txt"
+
+# --- Auditd rules ---
+timeout 10 bash -c '{
+  echo "=== auditctl -l ==="; auditctl -l 2>/dev/null || echo "(auditd not available)"
+  echo ""; echo "=== audit.rules ==="; cat /etc/audit/audit.rules 2>/dev/null; cat /etc/audit/rules.d/*.rules 2>/dev/null
+}' > "$FDIR/auditd_rules.txt"
+
+# --- Socket and named pipe files ---
+timeout 30 bash -c 'find /tmp /var/tmp /dev/shm /run -type s -o -type p 2>/dev/null | head -100' > "$FDIR/sockets_pipes.txt"
+
+# --- Log tampering evidence ---
+timeout 15 bash -c '{
+  echo "=== Zero-length logs ==="; find /var/log -maxdepth 2 -type f -empty -ls 2>/dev/null
+  echo ""; echo "=== Log file sizes ==="; ls -la /var/log/*.log /var/log/auth.log /var/log/syslog /var/log/secure 2>/dev/null
+  echo ""; echo "=== Last log write times ==="; stat /var/log/auth.log /var/log/syslog /var/log/secure 2>/dev/null
+}' > "$FDIR/log_tampering.txt"
+
+# --- Kernel taint flags ---
+timeout 5 bash -c '{
+  echo "=== Kernel taint ==="; cat /proc/sys/kernel/tainted 2>/dev/null
+  echo ""; echo "=== dmesg (last 50) ==="; dmesg 2>/dev/null | tail -50
+}' > "$FDIR/kernel_taint.txt"
+
+# --- /dev/shm deep listing ---
+timeout 15 bash -c 'find /dev/shm -ls 2>/dev/null' > "$FDIR/dev_shm_deep.txt"
+
+# --- /tmp deep listing with hidden files ---
+timeout 15 bash -c 'find /tmp -ls 2>/dev/null | head -300' > "$FDIR/tmp_deep.txt"
+
+# --- Environment variables ---
+timeout 10 bash -c '{
+  echo "=== /etc/environment ==="; cat /etc/environment 2>/dev/null
+  echo ""; echo "=== Current env ==="; env | sort
+}' > "$FDIR/environment.txt"
+
 echo "Comprehensive collection complete"
 `;
 

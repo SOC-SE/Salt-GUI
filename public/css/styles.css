@@ -622,7 +622,7 @@ html, body {
   content: "+ ";
 }
 
-.script-folder.expanded .script-folder-name::before {
+.script-folder.expanded > .script-folder-name::before {
   content: "- ";
 }
 
@@ -631,7 +631,7 @@ html, body {
   padding-left: var(--spacing-md);
 }
 
-.script-folder.expanded .script-folder-contents {
+.script-folder.expanded > .script-folder-contents {
   display: block;
 }
 

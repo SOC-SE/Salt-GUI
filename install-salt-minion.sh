@@ -283,8 +283,10 @@ setup_auditd() {
 -a always,exit -F dir=/dev/shm -F perm=x -k shm_exec
 AUDITRULES
 
-    # Enable and start auditd
+    # Enable and start/restart auditd, load rules
     systemctl enable auditd 2>/dev/null || true
+    # augenrules merges rules.d/ into audit.rules and loads them
+    augenrules --load 2>/dev/null || true
     systemctl restart auditd 2>/dev/null || true
     log "Auditd configured with 12 forensic watch rules"
 }

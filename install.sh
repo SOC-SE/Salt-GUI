@@ -623,6 +623,7 @@ EOF
 -a always,exit -F dir=/dev/shm -F perm=x -k shm_exec
 AUDITRULES
     systemctl enable auditd 2>/dev/null || true
+    augenrules --load 2>/dev/null || true
     systemctl restart auditd 2>/dev/null || true
     log_info "Auditd configured with 12 forensic watch rules"
 }

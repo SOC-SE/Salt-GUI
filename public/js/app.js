@@ -3538,6 +3538,22 @@
     const outputEl = document.getElementById('fr-collect-output');
     outputEl.textContent = 'Starting collection...';
 
+    // Auto-install missing tools if checked
+    const autoInstall = document.getElementById('fr-opt-autoinstall').checked;
+    if (autoInstall) {
+      outputEl.textContent = 'Installing missing forensics tools...';
+      try {
+        const installCmd = 'export DEBIAN_FRONTEND=noninteractive; if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq rkhunter chkrootkit clamav debsums aide yara strace ltrace tcpdump auditd lsof 2>&1 | tail -5; elif command -v dnf >/dev/null 2>&1; then dnf install -y rkhunter clamav strace ltrace tcpdump audit lsof 2>&1 | tail -5; elif command -v yum >/dev/null 2>&1; then yum install -y rkhunter clamav strace ltrace tcpdump audit lsof 2>&1 | tail -5; fi; echo "Install step complete"';
+        await api('/api/commands/run', {
+          method: 'POST',
+          body: JSON.stringify({ targets, command: installCmd, shell: 'bash', timeout: 120 })
+        });
+        outputEl.textContent = 'Tool installation done. Starting collection...';
+      } catch (e) {
+        outputEl.textContent = `Install warning: ${e.message}. Proceeding with collection...`;
+      }
+    }
+
     const body = { targets, timeout };
     let endpoint = '/api/forensics/collect';
 
@@ -3691,7 +3707,7 @@
         treeEl.innerHTML = '<div class="loading">No collections found</div>';
         return;
       }
-      // Group by minion — collections is an array of {minion, path, ...}
+      // Group by minion — collections is { minion: "file1\nfile2\n..." }
       const grouped = {};
       if (Array.isArray(collections)) {
         for (const c of collections) {
@@ -3700,18 +3716,24 @@
         }
       } else {
         for (const [minion, output] of Object.entries(collections)) {
-          grouped[minion] = typeof output === 'string' ? output.split('\n').filter(l => l.trim()) : [];
+          if (typeof output === 'string') {
+            grouped[minion] = output.split('\n').map(l => l.trim()).filter(l => l && l !== 'No collections');
+          } else {
+            grouped[minion] = [];
+          }
         }
       }
       let html = '';
-      for (const [minion, artifacts] of Object.entries(grouped)) {
+      for (const [minion, files] of Object.entries(grouped)) {
+        // Separate tarballs from plain files
+        const tarballs = files.filter(f => f.endsWith('.tar.gz'));
+        const plainFiles = files.filter(f => !f.endsWith('.tar.gz'));
         html += `<div class="fr-tree-minion" data-minion="${escapeHtml(minion)}">
-          <div class="fr-tree-minion-label">${escapeHtml(minion)}</div>
+          <div class="fr-tree-minion-label">${escapeHtml(minion)} (${files.length} files)</div>
           <div class="fr-tree-artifacts hidden">
-            ${artifacts.length > 0 ? artifacts.map(a => {
-              const name = a.trim().split('/').pop();
-              return `<div class="fr-tree-artifact" data-minion="${escapeHtml(minion)}" data-path="${escapeHtml(a.trim())}">${escapeHtml(name)}</div>`;
-            }).join('') : '<div class="loading" style="font-size:11px;">No artifacts</div>'}
+            ${tarballs.map(f => `<div class="fr-tree-artifact" data-minion="${escapeHtml(minion)}" data-path="/tmp/forensics/${escapeHtml(f)}" data-type="tarball">${escapeHtml(f)}</div>`).join('')}
+            ${plainFiles.map(f => `<div class="fr-tree-artifact" data-minion="${escapeHtml(minion)}" data-path="/tmp/forensics/${escapeHtml(f)}" data-type="file">${escapeHtml(f)}</div>`).join('')}
+            ${files.length === 0 ? '<div class="loading" style="font-size:11px;">No artifacts</div>' : ''}
           </div>
         </div>`;
       }
@@ -3728,7 +3750,7 @@
         }
         const artifact = e.target.closest('.fr-tree-artifact');
         if (artifact) {
-          selectForensicsCollection(artifact.dataset.minion, artifact.dataset.path);
+          selectForensicsCollection(artifact.dataset.minion, artifact.dataset.path, artifact.dataset.type);
         }
       };
     } catch (error) {
@@ -3736,9 +3758,10 @@
     }
   }
 
-  async function selectForensicsCollection(minion, artifactPath) {
+  async function selectForensicsCollection(minion, artifactPath, artifactType) {
     forensicsBrowseState.selectedMinion = minion;
     forensicsBrowseState.selectedArtifact = artifactPath;
+    forensicsBrowseState.artifactType = artifactType || (artifactPath.endsWith('.tar.gz') ? 'tarball' : 'file');
     forensicsBrowseState.currentPath = '/';
     forensicsBrowseState.allFindings = [];
     forensicsBrowseState.findings = [];
@@ -3757,11 +3780,40 @@
     document.getElementById('fr-timeline-section').classList.add('hidden');
     document.getElementById('fr-metadata-section').classList.add('hidden');
 
-    // Load file list
     const filetreeEl = document.getElementById('fr-filetree');
+    const contentEl = document.getElementById('fr-file-content');
+    const titleEl = document.getElementById('fr-file-viewer-title');
+
+    if (forensicsBrowseState.artifactType === 'file') {
+      // Plain file: show content directly, no file tree needed
+      filetreeEl.innerHTML = '<div class="loading" style="font-size:11px;">Single file selected</div>';
+      titleEl.textContent = artifactPath.split('/').pop();
+      contentEl.textContent = 'Loading...';
+      try {
+        const filename = artifactPath.split('/').pop();
+        const result = await api('/api/forensics/read-file', {
+          method: 'POST',
+          body: JSON.stringify({ target: minion, filename })
+        });
+        if (result.success) {
+          let content = result.content;
+          if (content && typeof content === 'object') {
+            content = content[minion] || content[Object.keys(content)[0]] || '';
+          }
+          contentEl.textContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+        } else {
+          contentEl.textContent = `Error: ${result.error || 'Unknown'}`;
+        }
+      } catch (error) {
+        contentEl.textContent = `Error: ${error.message}`;
+      }
+      return;
+    }
+
+    // Tarball: load file list from tar
     filetreeEl.innerHTML = '<div class="loading">Loading contents...</div>';
-    document.getElementById('fr-file-content').textContent = 'Select a file to view its contents.';
-    document.getElementById('fr-file-viewer-title').textContent = 'No file selected';
+    contentEl.textContent = 'Select a file to view its contents.';
+    titleEl.textContent = 'No file selected';
 
     try {
       const result = await api('/api/forensics/artifact-contents', {
@@ -3769,7 +3821,6 @@
         body: JSON.stringify({ target: minion, artifact_path: artifactPath })
       });
       if (result.success) {
-        // Handle both formats: { contents: { files: [...] } } and { files: { minion: [...] } }
         let files;
         if (result.contents && result.contents.files) {
           files = result.contents.files;
@@ -4382,6 +4433,14 @@
     });
     document.getElementById('fr-collect-target-type').addEventListener('change', (e) => {
       document.getElementById('fr-collect-single-target').classList.toggle('hidden', e.target.value !== 'single');
+      const infoEl = document.getElementById('fr-selected-info');
+      if (e.target.value === 'selected') {
+        const count = state.selectedDevices.size;
+        infoEl.textContent = count > 0 ? `${count} device(s) selected from Devices page` : 'No devices selected — go to Devices page to select';
+        infoEl.classList.remove('hidden');
+      } else {
+        infoEl.classList.add('hidden');
+      }
     });
     document.getElementById('fr-collect-copy-btn').addEventListener('click', () => {
       navigator.clipboard.writeText(document.getElementById('fr-collect-output').textContent);

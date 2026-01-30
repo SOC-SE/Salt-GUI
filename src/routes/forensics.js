@@ -165,7 +165,8 @@ router.get('/jobs', async (req, res) => {
  */
 router.get('/collections', async (req, res) => {
   try {
-    const result = await saltClient.cmd('*', 'ls -la /tmp/forensics/ 2>/dev/null || echo "No collections"', { shell: '/bin/bash', timeout: 30 });
+    // Return structured file list: one filename per line (not ls -la)
+    const result = await saltClient.cmd('*', 'find /tmp/forensics/ -maxdepth 1 -type f -printf "%f\\n" 2>/dev/null | sort || echo ""', { shell: '/bin/bash', timeout: 30 });
     res.json({ success: true, collections: result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -262,6 +263,28 @@ router.post('/artifact/:target/extract', async (req, res) => {
   }
   try {
     const result = await saltClient.cmd(target, `tar xzf '${artifact_path.replace(/'/g, "\\'")}' -O '${file_path.replace(/'/g, "\\'")}' 2>/dev/null | head -2000`, { shell: '/bin/bash', timeout: 60 });
+    res.json({ success: true, content: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/forensics/read-file
+ * Read a plain file from /tmp/forensics/ on a minion
+ */
+router.post('/read-file', async (req, res) => {
+  const { target, filename } = req.body;
+  if (!target || !filename) {
+    return res.status(400).json({ success: false, error: 'Target and filename required' });
+  }
+  // Sanitize: only allow simple filenames, no path traversal
+  const safe = filename.replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!safe) {
+    return res.status(400).json({ success: false, error: 'Invalid filename' });
+  }
+  try {
+    const result = await saltClient.cmd(target, `head -2000 '/tmp/forensics/${safe}' 2>/dev/null || echo "File not found"`, { shell: '/bin/bash', timeout: 30 });
     res.json({ success: true, content: result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

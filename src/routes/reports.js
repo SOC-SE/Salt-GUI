@@ -33,22 +33,24 @@ router.get('/status', auditAction('reports.status'), async (req, res) => {
     const keys = keysResult?.return?.[0]?.data?.return || keysResult;
     const accepted = keys.minions || [];
 
-    // Ping all minions to get status
-    // Note: timeout is for the HTTP request, not passed to the Salt function
-    const pingResult = await saltClient.run({
-      client: 'local',
-      tgt: '*',
-      fun: 'test.ping',
-      timeout: 15000  // 15 second HTTP timeout
-    });
+    // Get online/offline status and grains in parallel
+    const [statusResult, grainsResult] = await Promise.all([
+      saltClient.status(),
+      saltClient.run({
+        client: 'local',
+        tgt: '*',
+        fun: 'grains.item',
+        arg: ['kernel', 'os', 'os_family', 'ipv4'],
+        kwarg: { timeout: 30 }
+      })
+    ]);
 
-    // Get grains for all minions
-    const grainsResult = await saltClient.run({
-      client: 'local',
-      tgt: '*',
-      fun: 'grains.items',
-      timeout: 60000  // 60 second HTTP timeout for grains
-    });
+    const onlineMinions = new Set(statusResult.up || []);
+    // Build a pseudo ping result from status
+    const pingResult = {};
+    for (const m of accepted) {
+      pingResult[m] = onlineMinions.has(m);
+    }
 
     const minions = [];
     let online = 0;
@@ -63,17 +65,18 @@ router.get('/status', auditAction('reports.status'), async (req, res) => {
       if (isOnline) online++;
       else offline++;
 
-      const kernel = grains.kernel || 'Unknown';
+      const kernel = grains?.kernel || 'Unknown';
       if (kernel === 'Linux') linuxCount++;
       else if (kernel === 'Windows') windowsCount++;
 
+      const ipv4List = grains?.ipv4 || [];
       minions.push({
         id: minionId,
         status: isOnline ? 'online' : 'offline',
-        os: grains.os || 'Unknown',
-        osFamily: grains.os_family || 'Unknown',
+        os: grains?.os || 'Unknown',
+        osFamily: grains?.os_family || 'Unknown',
         kernel,
-        ip: grains.ipv4 ? grains.ipv4.filter(ip => ip !== '127.0.0.1')[0] : 'Unknown'
+        ip: ipv4List.filter(ip => ip !== '127.0.0.1')[0] || 'Unknown'
       });
     }
 
@@ -202,15 +205,8 @@ router.post('/security', auditAction('reports.security'), async (req, res) => {
         findings: []
       };
 
-      // Determine OS
-      const grainsResult = await saltClient.run({
-        client: 'local',
-        tgt: target,
-        fun: 'grains.item',
-        arg: ['kernel']
-      });
-
-      const kernel = grainsResult[target]?.kernel || 'Linux';
+      // Determine OS (uses kernel cache)
+      const kernel = await saltClient.getKernel(target);
       findings[target].kernel = kernel;
 
       // Quick security checks based on OS

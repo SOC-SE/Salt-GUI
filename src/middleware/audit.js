@@ -18,6 +18,9 @@ function auditAction(actionName) {
   return (req, res, next) => {
     const startTime = Date.now();
 
+    // Mark request as having explicit audit so auditAllMutations skips it
+    req._auditHandled = true;
+
     // Capture the original json method to intercept response
     const originalJson = res.json.bind(res);
 
@@ -113,6 +116,11 @@ function truncate(str, maxLen) {
 function auditAllMutations(req, res, next) {
   // Only audit mutation requests
   if (!['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) {
+    return next();
+  }
+
+  // Skip if already handled by a route-specific auditAction() middleware
+  if (req._auditHandled) {
     return next();
   }
 

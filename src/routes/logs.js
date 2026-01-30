@@ -17,30 +17,30 @@ const { auditAction } = require('../middleware/audit');
 // Apply authentication to all log routes
 router.use(requireAuth);
 
-// Common log file paths
-const COMMON_LOGS = {
-  linux: [
-    { name: 'Auth Log', path: '/var/log/auth.log', alt: '/var/log/secure' },
-    { name: 'Syslog', path: '/var/log/syslog', alt: '/var/log/messages' },
-    { name: 'Kernel Log', path: '/var/log/kern.log', alt: '/var/log/dmesg' },
-    { name: 'Salt Minion', path: '/var/log/salt/minion' },
-    { name: 'Cron Log', path: '/var/log/cron' },
-    { name: 'Apache Access', path: '/var/log/apache2/access.log', alt: '/var/log/httpd/access_log' },
-    { name: 'Apache Error', path: '/var/log/apache2/error.log', alt: '/var/log/httpd/error_log' },
-    { name: 'Nginx Access', path: '/var/log/nginx/access.log' },
-    { name: 'Nginx Error', path: '/var/log/nginx/error.log' }
-  ],
-  windows: [
-    { name: 'System Events', type: 'event', log: 'System' },
-    { name: 'Security Events', type: 'event', log: 'Security' },
-    { name: 'Application Events', type: 'event', log: 'Application' },
-    { name: 'Salt Minion', path: 'C:\\salt\\var\\log\\salt\\minion' }
-  ]
-};
+// Windows event logs (always available)
+const WINDOWS_EVENT_LOGS = [
+  { name: 'System Events', type: 'event', log: 'System' },
+  { name: 'Security Events', type: 'event', log: 'Security' },
+  { name: 'Application Events', type: 'event', log: 'Application' }
+];
+
+/**
+ * Build a display name from a log file path.
+ * e.g. /var/log/nginx/access.log -> "nginx/access.log"
+ *      /var/log/auth.log -> "auth.log"
+ *      /var/log/salt/minion -> "salt/minion"
+ */
+function logDisplayName(filePath) {
+  const prefix = '/var/log/';
+  if (filePath.startsWith(prefix)) {
+    return filePath.slice(prefix.length);
+  }
+  return filePath;
+}
 
 /**
  * GET /api/logs/sources
- * Get available log sources for a target
+ * Dynamically discover available log files on a target
  */
 router.get('/sources/:target', async (req, res) => {
   const { target } = req.params;
@@ -53,17 +53,78 @@ router.get('/sources/:target', async (req, res) => {
   }
 
   try {
-    // Get kernel type (uses cache for speed)
     const kernel = await saltClient.getKernel(target);
 
-    const sources = kernel === 'Windows' ? COMMON_LOGS.windows : COMMON_LOGS.linux;
+    if (kernel === 'Windows') {
+      // For Windows, list event logs plus discover text log files
+      const sources = [...WINDOWS_EVENT_LOGS];
 
-    res.json({
-      success: true,
-      target,
-      kernel,
-      sources
+      try {
+        const command = `powershell -Command "Get-ChildItem -Path 'C:\\salt\\var\\log','C:\\Windows\\Logs' -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Select-Object -ExpandProperty FullName | Sort-Object"`;
+        const result = await saltClient.run({
+          client: 'local',
+          tgt: target,
+          fun: 'cmd.run',
+          arg: [command],
+          kwarg: { timeout: 15 }
+        });
+
+        const output = result[target];
+        if (output && typeof output === 'string') {
+          output.split('\n').filter(l => l.trim()).forEach(filePath => {
+            sources.push({ name: filePath.trim(), path: filePath.trim() });
+          });
+        }
+      } catch (e) {
+        // If discovery fails, still return event logs
+        logger.debug('Windows log file discovery failed', e.message);
+      }
+
+      return res.json({ success: true, target, kernel, sources });
+    }
+
+    // Linux: discover log files dynamically
+    const command = `find /var/log -type f \\( -name '*.log' -o -name '*.log.*' -o -name 'syslog' -o -name 'syslog.*' -o -name 'messages' -o -name 'messages.*' -o -name 'secure' -o -name 'secure.*' -o -name 'auth.log' -o -name 'auth.log.*' -o -name 'cron' -o -name 'cron.*' -o -name 'kern.log' -o -name 'kern.log.*' -o -name 'dmesg' -o -name 'dmesg.*' -o -name 'minion' -o -name 'master' -o -name 'lastlog' -o -name 'faillog' -o -name 'btmp' -o -name 'wtmp' -o -name 'dpkg.log' -o -name 'yum.log' -o -name 'dnf.log' \\) -size +0c 2>/dev/null | sort`;
+
+    const result = await saltClient.run({
+      client: 'local',
+      tgt: target,
+      fun: 'cmd.run',
+      arg: [command],
+      kwarg: { timeout: 15 }
     });
+
+    const output = result[target];
+    const sources = [];
+
+    if (output && typeof output === 'string') {
+      const files = output.split('\n').filter(l => l.trim() && l.startsWith('/'));
+
+      // Skip binary log files
+      const binaryFiles = new Set(['lastlog', 'faillog', 'btmp', 'wtmp']);
+
+      for (const filePath of files) {
+        const basename = filePath.split('/').pop();
+        if (binaryFiles.has(basename)) continue;
+
+        sources.push({
+          name: logDisplayName(filePath),
+          path: filePath
+        });
+      }
+    }
+
+    // If discovery returned nothing, provide a minimal fallback
+    if (sources.length === 0) {
+      sources.push(
+        { name: 'syslog', path: '/var/log/syslog' },
+        { name: 'messages', path: '/var/log/messages' },
+        { name: 'auth.log', path: '/var/log/auth.log' },
+        { name: 'secure', path: '/var/log/secure' }
+      );
+    }
+
+    res.json({ success: true, target, kernel, sources });
 
   } catch (error) {
     logger.error('Failed to get log sources', error);

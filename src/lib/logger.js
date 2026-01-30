@@ -31,14 +31,45 @@ const COLORS = {
   cyan: '\x1b[36m'
 };
 
+// Cached log level to avoid reading config on every log call
+let _cachedLogLevel = null;
+let _cachedLogLevelTime = 0;
+const LOG_LEVEL_CACHE_TTL = 30000; // Refresh every 30 seconds
+
+// Cached audit path to avoid resolving on every audit call
+let _cachedAuditPath = null;
+let _cachedAuditPathTime = 0;
+let _auditDirEnsured = false;
+
 /**
- * Get current log level from configuration
+ * Get current log level from configuration (cached)
  * @returns {number} Numeric log level
  */
 function getCurrentLogLevel() {
+  const now = Date.now();
+  if (_cachedLogLevel !== null && (now - _cachedLogLevelTime) < LOG_LEVEL_CACHE_TTL) {
+    return _cachedLogLevel;
+  }
   const config = getAppConfig();
   const levelName = config.logging?.level || 'info';
-  return LOG_LEVELS[levelName] ?? LOG_LEVELS.info;
+  _cachedLogLevel = LOG_LEVELS[levelName] ?? LOG_LEVELS.info;
+  _cachedLogLevelTime = now;
+  return _cachedLogLevel;
+}
+
+/**
+ * Get resolved audit log path (cached)
+ * @returns {string} Resolved audit file path
+ */
+function getAuditPath() {
+  const now = Date.now();
+  if (_cachedAuditPath && (now - _cachedAuditPathTime) < LOG_LEVEL_CACHE_TTL) {
+    return _cachedAuditPath;
+  }
+  const config = getAppConfig();
+  _cachedAuditPath = path.resolve(config.logging?.audit_file || 'logs/audit.yaml');
+  _cachedAuditPathTime = now;
+  return _cachedAuditPath;
 }
 
 /**
@@ -123,20 +154,7 @@ function error(message, data = null) {
 }
 
 /**
- * Audit log entry structure
- * @typedef {Object} AuditEntry
- * @property {string} timestamp - ISO timestamp
- * @property {string} user - Username who performed action
- * @property {string} ip - Client IP address
- * @property {string} action - Action performed
- * @property {string|string[]} [targets] - Target minions
- * @property {Object} [details] - Additional details (sanitized)
- * @property {string} result - Result status
- * @property {number} [duration_ms] - Duration in milliseconds
- */
-
-/**
- * Write an audit log entry
+ * Write an audit log entry (async - non-blocking)
  * @param {Object} entry - Audit entry data
  * @param {string} entry.user - Username
  * @param {string} entry.ip - Client IP address
@@ -147,8 +165,7 @@ function error(message, data = null) {
  * @param {number} [entry.duration_ms] - Duration in milliseconds
  */
 function audit(entry) {
-  const config = getAppConfig();
-  const auditPath = path.resolve(config.logging?.audit_file || 'logs/audit.yaml');
+  const auditPath = getAuditPath();
 
   // Sanitize details - remove passwords and sensitive data
   const sanitizedDetails = entry.details ? sanitizeDetails(entry.details) : undefined;
@@ -165,19 +182,22 @@ function audit(entry) {
   };
 
   // Remove undefined fields
-  Object.keys(auditEntry).forEach(key => {
+  for (const key of Object.keys(auditEntry)) {
     if (auditEntry[key] === undefined) {
       delete auditEntry[key];
     }
-  });
-
-  // Ensure directory exists
-  const auditDir = path.dirname(auditPath);
-  if (!fs.existsSync(auditDir)) {
-    fs.mkdirSync(auditDir, { recursive: true });
   }
 
-  // Append to YAML file
+  // Ensure directory exists (once)
+  if (!_auditDirEnsured) {
+    const auditDir = path.dirname(auditPath);
+    if (!fs.existsSync(auditDir)) {
+      fs.mkdirSync(auditDir, { recursive: true });
+    }
+    _auditDirEnsured = true;
+  }
+
+  // Append to YAML file asynchronously (non-blocking)
   try {
     const yamlEntry = yaml.dump([auditEntry], {
       indent: 2,
@@ -185,13 +205,17 @@ function audit(entry) {
       noRefs: true
     });
 
-    // Remove the leading '- ' and add proper document separator for append
     const formattedEntry = '---\n' + yamlEntry;
 
-    fs.appendFileSync(auditPath, formattedEntry);
+    fs.appendFile(auditPath, formattedEntry, (err) => {
+      if (err) {
+        console.error(`[Logger] Failed to write audit log: ${err.message}`);
+      }
+    });
+
     debug(`Audit logged: ${entry.action}`);
   } catch (err) {
-    error('Failed to write audit log', err);
+    error('Failed to format audit log entry', err);
   }
 }
 
@@ -217,13 +241,13 @@ function sanitizeDetails(details) {
 }
 
 /**
- * Read audit log entries
+ * Read audit log entries efficiently
+ * Uses reverse reading to avoid loading the entire file for small limits.
  * @param {number} [limit=100] - Maximum entries to return
  * @returns {Array} Array of audit entries
  */
 function readAuditLog(limit = 100) {
-  const config = getAppConfig();
-  const auditPath = path.resolve(config.logging?.audit_file || 'logs/audit.yaml');
+  const auditPath = getAuditPath();
 
   if (!fs.existsSync(auditPath)) {
     return [];
@@ -231,9 +255,33 @@ function readAuditLog(limit = 100) {
 
   try {
     const content = fs.readFileSync(auditPath, 'utf8');
-    // Parse YAML documents (separated by ---)
-    const entries = yaml.loadAll(content).flat().filter(Boolean);
-    // Return most recent entries
+    if (!content.trim()) {
+      return [];
+    }
+
+    // Split on YAML document separators and parse only what we need
+    const documents = content.split(/^---$/m).filter(d => d.trim());
+
+    // Only parse the last `limit` documents to avoid unnecessary work
+    const startIdx = Math.max(0, documents.length - limit);
+    const entries = [];
+
+    for (let i = startIdx; i < documents.length; i++) {
+      try {
+        const parsed = yaml.load(documents[i]);
+        if (parsed) {
+          // yaml.load of a dumped array returns an array with one element
+          if (Array.isArray(parsed)) {
+            entries.push(...parsed.filter(Boolean));
+          } else {
+            entries.push(parsed);
+          }
+        }
+      } catch (e) {
+        // Skip malformed entries
+      }
+    }
+
     return entries.slice(-limit);
   } catch (err) {
     error('Failed to read audit log', err);
@@ -245,13 +293,13 @@ function readAuditLog(limit = 100) {
  * Clear audit log
  */
 function clearAuditLog() {
-  const config = getAppConfig();
-  const auditPath = path.resolve(config.logging?.audit_file || 'logs/audit.yaml');
+  const auditPath = getAuditPath();
 
   try {
     if (fs.existsSync(auditPath)) {
       fs.writeFileSync(auditPath, '');
     }
+    _auditDirEnsured = false; // Reset so it re-checks on next write
     info('Audit log cleared');
   } catch (err) {
     error('Failed to clear audit log', err);

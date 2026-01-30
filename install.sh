@@ -495,6 +495,13 @@ rest_cherrypy:
   # For testing without SSL, comment above and uncomment:
   # disable_ssl: True
 
+# Required for Salt 3007+: explicitly enable API client types
+netapi_enable_clients:
+  - local
+  - local_async
+  - runner
+  - wheel
+
 # External authentication
 # By default, use PAM authentication with root user
 # Modify this for your security requirements
@@ -511,6 +518,54 @@ external_auth:
 EOF
 
     log_info "Salt API configured on port 8000 with SSL"
+
+    # Salt Master must run as root for PAM authentication to work
+    # (needs access to /etc/shadow)
+    local master_user_conf="/etc/salt/master.d/user.conf"
+    if [[ ! -f "$master_user_conf" ]]; then
+        log_substep "Configuring Salt Master to run as root (required for PAM auth)..."
+        cat > "$master_user_conf" << 'EOF'
+# Run salt-master as root (required for PAM authentication)
+user: root
+EOF
+    fi
+
+    # Ensure SSL key is readable by salt-api
+    chmod 644 "$salt_pki_dir/salt-api.key" 2>/dev/null || true
+    chmod 644 "$salt_pki_dir/salt-api.crt" 2>/dev/null || true
+
+    # Create saltadmin system user for PAM authentication
+    if ! id -u saltadmin &>/dev/null; then
+        log_substep "Creating saltadmin system user for Salt API authentication..."
+        useradd -r -s /bin/bash saltadmin 2>/dev/null || true
+        echo "saltadmin:saltadmin" | chpasswd
+        log_info "Created saltadmin user (password: saltadmin)"
+    fi
+
+    # Configure Salt file_roots to include Salt-GUI states
+    local file_roots_conf="/etc/salt/master.d/file_roots.conf"
+    if [[ ! -f "$file_roots_conf" ]]; then
+        log_substep "Configuring Salt file_roots to include Salt-GUI states..."
+        cat > "$file_roots_conf" << EOF
+# Include Salt-GUI states in Salt's file_roots
+# States in ${INSTALL_DIR}/states/ are accessible via Salt state.apply
+# e.g. linux.security.falco -> ${INSTALL_DIR}/states/linux/security/falco.sls
+file_roots:
+  base:
+    - /srv/salt
+    - ${INSTALL_DIR}/states
+EOF
+        mkdir -p /srv/salt
+        log_info "Salt file_roots configured to include ${INSTALL_DIR}/states"
+    fi
+
+    # Install python-pam for PAM authentication support
+    log_substep "Ensuring python-pam is available..."
+    if [[ -x /opt/saltstack/salt/bin/pip3 ]]; then
+        /opt/saltstack/salt/bin/pip3 install python-pam 2>/dev/null || true
+    elif command -v pip3 &>/dev/null; then
+        pip3 install python-pam 2>/dev/null || true
+    fi
 }
 
 configure_salt_minion() {
@@ -707,8 +762,8 @@ EOF
 
 api:
   url: "https://localhost:8000"
-  username: "root"
-  password: ""  # Set this or use PAM authentication
+  username: "saltadmin"
+  password: "saltadmin"
   eauth: "pam"
   verify_ssl: false  # Set to true in production with valid certs
 
@@ -717,19 +772,21 @@ defaults:
   batch_size: 10
 EOF
 
-        log_warn "Salt API password not set in config/salt.yaml"
-        log_warn "Edit $config_dir/salt.yaml to configure Salt API authentication"
+        log_info "Salt API configured with saltadmin user"
     fi
 
-    # Create auth.yaml if it doesn't exist (empty - users created via UI)
+    # Create auth.yaml if it doesn't exist
     if [[ ! -f "$config_dir/auth.yaml" ]]; then
-        log_substep "Creating auth.yaml..."
-        cat > "$config_dir/auth.yaml" << EOF
+        log_substep "Creating auth.yaml with default admin user..."
+        cat > "$config_dir/auth.yaml" << 'EOF'
 # Salt-GUI User Authentication
-# Users are created via the web UI on first access
 # Passwords are stored as bcrypt hashes
+# Default: admin / Changeme1!
 
-users: {}
+users:
+  admin:
+    password_hash: "$2b$12$fzH7uhWZxv9ssFBWmmUyn.aysvz7NJV4xFT1cWUW26BOQabWzKKhO"
+    role: admin
 EOF
     fi
 

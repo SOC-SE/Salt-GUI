@@ -10,19 +10,39 @@ const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 const { client: saltClient } = require('../lib/salt-client');
 const logger = require('../lib/logger');
+const { resolveTargets } = require('../lib/targets');
 
 // All routes require authentication
 router.use(requireAuth);
 
 /**
- * Helper to resolve target and type
+ * Helper: get kernel map for targets using cached batch resolution
+ * Returns null and sends 404 if no minions respond.
  */
-function resolveTarget(targets) {
-  const target = Array.isArray(targets) ? targets : [targets];
-  const tgtType = target.length === 1 && target[0] === '*' ? 'glob' :
-                  target.length === 1 && target[0].includes('*') ? 'glob' : 'list';
-  const tgt = tgtType === 'glob' ? target[0] : target;
-  return { tgt, tgtType };
+async function getKernelMap(targets, res) {
+  const resolved = resolveTargets(targets);
+  if (!resolved.valid) {
+    res.status(400).json({ success: false, error: resolved.error });
+    return null;
+  }
+
+  const kernels = await saltClient.getKernels(resolved.targets);
+  if (!kernels || Object.keys(kernels).length === 0) {
+    res.status(404).json({ success: false, error: 'No minions responded' });
+    return null;
+  }
+
+  return kernels;
+}
+
+/**
+ * Helper: get kernel + os_family for targets that need both
+ */
+async function getGrainsMap(targets, grainNames) {
+  const resolved = resolveTargets(targets);
+  if (!resolved.valid) return null;
+
+  return saltClient.grainsItem(resolved.tgt, grainNames);
 }
 
 /**
@@ -40,34 +60,17 @@ router.post('/list', async (req, res) => {
   }
 
   try {
-    const { tgt, tgtType } = resolveTarget(targets);
-
-    // First get kernel to determine OS
-    const grains = await saltClient.run({
-      client: 'local',
-      fun: 'grains.item',
-      tgt: tgt,
-      tgt_type: tgtType,
-      arg: ['kernel']
-    });
-
-    if (!grains || Object.keys(grains).length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'No minions responded'
-      });
-    }
+    const kernels = await getKernelMap(targets, res);
+    if (!kernels) return;
 
     const results = {};
 
-    for (const [minion, minionGrains] of Object.entries(grains)) {
-      const kernel = minionGrains?.kernel || 'Linux';
-
+    // Process minions in parallel
+    const minionPromises = Object.entries(kernels).map(async ([minion, kernel]) => {
       try {
         let users = [];
 
         if (kernel === 'Windows') {
-          // Windows: Get local users with net user
           const cmdResult = await saltClient.run({
             client: 'local',
             fun: 'cmd.run_all',
@@ -80,7 +83,6 @@ router.post('/list', async (req, res) => {
           if (output?.retcode === 0 && output?.stdout) {
             try {
               const parsed = JSON.parse(output.stdout);
-              // Handle single user case (not array)
               const userList = Array.isArray(parsed) ? parsed : [parsed];
               users = userList.map(u => ({
                 username: u.Name,
@@ -92,7 +94,6 @@ router.post('/list', async (req, res) => {
                 groups: []
               }));
             } catch (e) {
-              // Fallback to net user parsing
               const lines = output.stdout.split('\n').filter(l => l.trim());
               users = lines.slice(4).filter(l => !l.includes('---')).map(l => ({
                 username: l.trim(),
@@ -106,50 +107,49 @@ router.post('/list', async (req, res) => {
             }
           }
         } else {
-          // Linux: Parse /etc/passwd and get additional info
-          const passwdResult = await saltClient.run({
-            client: 'local',
-            fun: 'cmd.run_all',
-            tgt: minion,
-            arg: ['cat /etc/passwd'],
-            kwarg: { shell: '/bin/bash', timeout: 30 }
-          });
-
-          const passwdOutput = passwdResult[minion];
-          if (passwdOutput?.retcode === 0 && passwdOutput?.stdout) {
-            const lines = passwdOutput.stdout.split('\n').filter(l => l.trim());
-
-            // Get shadow info for account status
-            const shadowResult = await saltClient.run({
+          // Linux: Fetch passwd, shadow, and groups in parallel
+          const [passwdResult, shadowResult, groupsResult] = await Promise.all([
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: ['cat /etc/passwd'],
+              kwarg: { shell: '/bin/bash', timeout: 30 }
+            }),
+            saltClient.run({
               client: 'local',
               fun: 'cmd.run_all',
               tgt: minion,
               arg: ['cat /etc/shadow 2>/dev/null || echo "no-access"'],
               kwarg: { shell: '/bin/bash', timeout: 30 }
-            });
+            }),
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: ['cat /etc/group'],
+              kwarg: { shell: '/bin/bash', timeout: 30 }
+            })
+          ]);
 
-            const shadowOutput = shadowResult[minion];
+          const passwdOutput = passwdResult[minion];
+          if (passwdOutput?.retcode === 0 && passwdOutput?.stdout) {
+            const lines = passwdOutput.stdout.split('\n').filter(l => l.trim());
+
+            // Parse shadow info
             const shadowMap = {};
+            const shadowOutput = shadowResult[minion];
             if (shadowOutput?.retcode === 0 && shadowOutput?.stdout !== 'no-access') {
               shadowOutput.stdout.split('\n').forEach(line => {
                 const parts = line.split(':');
                 if (parts.length >= 2) {
-                  // Account is locked if password starts with ! or *
                   const locked = parts[1].startsWith('!') || parts[1].startsWith('*') || parts[1] === '!!';
                   shadowMap[parts[0]] = { locked };
                 }
               });
             }
 
-            // Get group memberships
-            const groupsResult = await saltClient.run({
-              client: 'local',
-              fun: 'cmd.run_all',
-              tgt: minion,
-              arg: ['cat /etc/group'],
-              kwarg: { shell: '/bin/bash', timeout: 30 }
-            });
-
+            // Parse group memberships
             const groupMap = {};
             if (groupsResult[minion]?.retcode === 0) {
               groupsResult[minion].stdout.split('\n').forEach(line => {
@@ -173,13 +173,11 @@ router.post('/list', async (req, res) => {
               const home = parts[5] || '';
               const description = parts[4] || '';
 
-              // Determine if account is disabled
               const shadowInfo = shadowMap[username] || {};
               const nologinShells = ['/sbin/nologin', '/usr/sbin/nologin', '/bin/false', '/usr/bin/false'];
               const isDisabledShell = nologinShells.includes(shell);
               const isLocked = shadowInfo.locked || false;
 
-              // Check if user has sudo access
               const userGroups = groupMap[username] || [];
               const hasSudo = userGroups.includes('wheel') || userGroups.includes('sudo');
 
@@ -211,7 +209,9 @@ router.post('/list', async (req, res) => {
           error: err.message
         };
       }
-    }
+    });
+
+    await Promise.all(minionPromises);
 
     res.json({
       success: true,
@@ -241,7 +241,6 @@ router.post('/create', async (req, res) => {
     });
   }
 
-  // Username validation
   if (!/^[a-z_][a-z0-9_-]*[$]?$/.test(username)) {
     return res.status(400).json({
       success: false,
@@ -249,7 +248,6 @@ router.post('/create', async (req, res) => {
     });
   }
 
-  // Password validation
   if (password.length < 8) {
     return res.status(400).json({
       success: false,
@@ -265,16 +263,8 @@ router.post('/create', async (req, res) => {
       sudo
     });
 
-    const { tgt, tgtType } = resolveTarget(targets);
-
-    // Get kernel info
-    const grains = await saltClient.run({
-      client: 'local',
-      fun: 'grains.item',
-      tgt: tgt,
-      tgt_type: tgtType,
-      arg: ['kernel', 'os_family']
-    });
+    // Need os_family for sudo group detection, so use grainsItem
+    const grains = await getGrainsMap(targets, ['kernel', 'os_family']);
 
     if (!grains || Object.keys(grains).length === 0) {
       return res.status(404).json({
@@ -282,6 +272,13 @@ router.post('/create', async (req, res) => {
         error: 'No minions responded'
       });
     }
+
+    // Populate kernel cache from the grains we just fetched
+    const kernelData = {};
+    for (const [m, g] of Object.entries(grains)) {
+      kernelData[m] = { kernel: g?.kernel };
+    }
+    saltClient.populateKernelCache(kernelData);
 
     const results = {};
     let successCount = 0;
@@ -295,7 +292,6 @@ router.post('/create', async (req, res) => {
         let cmdResult;
 
         if (kernel === 'Windows') {
-          // Windows: Create user with net user
           const escapedPassword = password.replace(/"/g, '`"');
           const command = `net user "${username}" "${escapedPassword}" /add`;
 
@@ -307,7 +303,6 @@ router.post('/create', async (req, res) => {
             kwarg: { shell: 'cmd', timeout: 30 }
           });
 
-          // Add to Administrators if sudo requested
           if (sudo && cmdResult[minion]?.retcode === 0) {
             await saltClient.run({
               client: 'local',
@@ -318,7 +313,6 @@ router.post('/create', async (req, res) => {
             });
           }
         } else {
-          // Linux: Create user with useradd and set password
           const homeFlag = createHome ? '-m' : '';
           const shellFlag = shell ? `-s ${shell}` : '';
           const createCmd = `useradd ${homeFlag} ${shellFlag} ${username}`;
@@ -331,7 +325,6 @@ router.post('/create', async (req, res) => {
             kwarg: { shell: '/bin/bash', timeout: 30 }
           });
 
-          // Set password
           if (cmdResult[minion]?.retcode === 0 || cmdResult[minion]?.stderr?.includes('already exists')) {
             const escapedPassword = password.replace(/'/g, "'\\''");
             await saltClient.run({
@@ -342,9 +335,7 @@ router.post('/create', async (req, res) => {
               kwarg: { shell: '/bin/bash', timeout: 30 }
             });
 
-            // Add sudo access if requested
             if (sudo) {
-              // Determine sudo group based on OS family
               const sudoGroup = osFamily === 'Debian' ? 'sudo' : 'wheel';
               await saltClient.run({
                 client: 'local',
@@ -414,7 +405,6 @@ router.post('/disable', async (req, res) => {
     });
   }
 
-  // Prevent disabling critical accounts
   const protectedUsers = ['root', 'Administrator', 'SYSTEM'];
   if (protectedUsers.includes(username)) {
     return res.status(400).json({
@@ -430,36 +420,18 @@ router.post('/disable', async (req, res) => {
       targetUser: username
     });
 
-    const { tgt, tgtType } = resolveTarget(targets);
-
-    // Get kernel info
-    const grains = await saltClient.run({
-      client: 'local',
-      fun: 'grains.item',
-      tgt: tgt,
-      tgt_type: tgtType,
-      arg: ['kernel']
-    });
-
-    if (!grains || Object.keys(grains).length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'No minions responded'
-      });
-    }
+    const kernels = await getKernelMap(targets, res);
+    if (!kernels) return;
 
     const results = {};
     let successCount = 0;
     let failCount = 0;
 
-    for (const [minion, minionGrains] of Object.entries(grains)) {
-      const kernel = minionGrains?.kernel || 'Linux';
-
+    for (const [minion, kernel] of Object.entries(kernels)) {
       try {
         let cmdResult;
 
         if (kernel === 'Windows') {
-          // Windows: Disable user account
           const command = `net user "${username}" /active:no`;
           cmdResult = await saltClient.run({
             client: 'local',
@@ -470,27 +442,25 @@ router.post('/disable', async (req, res) => {
           });
         } else {
           // Linux: Lock account AND set shell to nologin
-          // Use separate commands to avoid shell parsing issues with Salt API
+          // Run lock and shell change in parallel, expire sequentially
+          const [lockResult] = await Promise.all([
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: [`passwd -l ${username}`],
+              kwarg: { timeout: 30 }
+            }),
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: [`usermod -s /sbin/nologin ${username}`],
+              kwarg: { timeout: 30 }
+            })
+          ]);
 
-          // Step 1: Lock the password
-          const lockResult = await saltClient.run({
-            client: 'local',
-            fun: 'cmd.run_all',
-            tgt: minion,
-            arg: [`passwd -l ${username}`],
-            kwarg: { timeout: 30 }
-          });
-
-          // Step 2: Change shell to nologin
-          const shellResult = await saltClient.run({
-            client: 'local',
-            fun: 'cmd.run_all',
-            tgt: minion,
-            arg: [`usermod -s /sbin/nologin ${username}`],
-            kwarg: { timeout: 30 }
-          });
-
-          // Step 3: Expire the account
+          // Expire the account
           await saltClient.run({
             client: 'local',
             fun: 'cmd.run_all',
@@ -499,7 +469,6 @@ router.post('/disable', async (req, res) => {
             kwarg: { timeout: 30 }
           });
 
-          // Use the lock result as the main result
           cmdResult = lockResult;
         }
 
@@ -566,36 +535,18 @@ router.post('/enable', async (req, res) => {
       targetUser: username
     });
 
-    const { tgt, tgtType } = resolveTarget(targets);
-
-    // Get kernel info
-    const grains = await saltClient.run({
-      client: 'local',
-      fun: 'grains.item',
-      tgt: tgt,
-      tgt_type: tgtType,
-      arg: ['kernel']
-    });
-
-    if (!grains || Object.keys(grains).length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'No minions responded'
-      });
-    }
+    const kernels = await getKernelMap(targets, res);
+    if (!kernels) return;
 
     const results = {};
     let successCount = 0;
     let failCount = 0;
 
-    for (const [minion, minionGrains] of Object.entries(grains)) {
-      const kernel = minionGrains?.kernel || 'Linux';
-
+    for (const [minion, kernel] of Object.entries(kernels)) {
       try {
         let cmdResult;
 
         if (kernel === 'Windows') {
-          // Windows: Enable user account
           const command = `net user "${username}" /active:yes`;
           cmdResult = await saltClient.run({
             client: 'local',
@@ -605,8 +556,7 @@ router.post('/enable', async (req, res) => {
             kwarg: { shell: 'cmd', timeout: 30 }
           });
         } else {
-          // Linux: Unlock account AND restore shell
-          // First check if password is * or !! which can't be unlocked without setting a password
+          // Check if password is set
           const checkResult = await saltClient.run({
             client: 'local',
             fun: 'cmd.run_all',
@@ -619,7 +569,6 @@ router.post('/enable', async (req, res) => {
           const hasNoPassword = passwordField === '*' || passwordField === '!!' || passwordField === '';
 
           if (hasNoPassword) {
-            // Account has no password set - can only enable by setting one
             results[minion] = {
               success: false,
               error: `User ${username} has no password set (${passwordField}). Set a password first to enable login.`
@@ -628,37 +577,31 @@ router.post('/enable', async (req, res) => {
             continue;
           }
 
-          // For accounts with locked password (starts with !), unlock
-          // Use separate commands to avoid shell parsing issues with Salt API
+          // Unlock and restore shell in parallel
+          const [unlockResult] = await Promise.all([
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: [`passwd -u ${username}`],
+              kwarg: { timeout: 30 }
+            }),
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: [`usermod -s ${shell} ${username}`],
+              kwarg: { timeout: 30 }
+            }),
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: [`chage -E -1 ${username}`],
+              kwarg: { timeout: 30 }
+            })
+          ]);
 
-          // Step 1: Unlock the password
-          const unlockResult = await saltClient.run({
-            client: 'local',
-            fun: 'cmd.run_all',
-            tgt: minion,
-            arg: [`passwd -u ${username}`],
-            kwarg: { timeout: 30 }
-          });
-
-          // Step 2: Restore shell
-          await saltClient.run({
-            client: 'local',
-            fun: 'cmd.run_all',
-            tgt: minion,
-            arg: [`usermod -s ${shell} ${username}`],
-            kwarg: { timeout: 30 }
-          });
-
-          // Step 3: Remove account expiration
-          await saltClient.run({
-            client: 'local',
-            fun: 'cmd.run_all',
-            tgt: minion,
-            arg: [`chage -E -1 ${username}`],
-            kwarg: { timeout: 30 }
-          });
-
-          // Use the unlock result as the main result
           cmdResult = unlockResult;
         }
 
@@ -726,16 +669,8 @@ router.post('/sudo', async (req, res) => {
       action: grant ? 'grant' : 'revoke'
     });
 
-    const { tgt, tgtType } = resolveTarget(targets);
-
-    // Get kernel and OS family
-    const grains = await saltClient.run({
-      client: 'local',
-      fun: 'grains.item',
-      tgt: tgt,
-      tgt_type: tgtType,
-      arg: ['kernel', 'os_family']
-    });
+    // Need os_family for sudo group detection
+    const grains = await getGrainsMap(targets, ['kernel', 'os_family']);
 
     if (!grains || Object.keys(grains).length === 0) {
       return res.status(404).json({
@@ -743,6 +678,13 @@ router.post('/sudo', async (req, res) => {
         error: 'No minions responded'
       });
     }
+
+    // Populate kernel cache
+    const kernelData = {};
+    for (const [m, g] of Object.entries(grains)) {
+      kernelData[m] = { kernel: g?.kernel };
+    }
+    saltClient.populateKernelCache(kernelData);
 
     const results = {};
     let successCount = 0;
@@ -756,7 +698,6 @@ router.post('/sudo', async (req, res) => {
         let cmdResult;
 
         if (kernel === 'Windows') {
-          // Windows: Add/remove from Administrators group
           const action = grant ? '/add' : '/delete';
           const command = `net localgroup Administrators "${username}" ${action}`;
           cmdResult = await saltClient.run({
@@ -767,14 +708,12 @@ router.post('/sudo', async (req, res) => {
             kwarg: { shell: 'cmd', timeout: 30 }
           });
         } else {
-          // Linux: Add/remove from wheel (RHEL) or sudo (Debian) group
           const sudoGroup = osFamily === 'Debian' ? 'sudo' : 'wheel';
 
           let command;
           if (grant) {
             command = `usermod -aG ${sudoGroup} ${username}`;
           } else {
-            // Remove from group using gpasswd
             command = `gpasswd -d ${username} ${sudoGroup}`;
           }
 
@@ -831,7 +770,7 @@ router.post('/sudo', async (req, res) => {
 
 /**
  * POST /api/users/change-password
- * Change password for an existing user (from passwords.js)
+ * Change password for an existing user
  */
 router.post('/change-password', async (req, res) => {
   const { targets, username, password } = req.body;
@@ -864,31 +803,14 @@ router.post('/change-password', async (req, res) => {
       targetUser: username
     });
 
-    const { tgt, tgtType } = resolveTarget(targets);
-
-    // Get kernel info
-    const grains = await saltClient.run({
-      client: 'local',
-      fun: 'grains.item',
-      tgt: tgt,
-      tgt_type: tgtType,
-      arg: ['kernel']
-    });
-
-    if (!grains || Object.keys(grains).length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'No minions responded'
-      });
-    }
+    const kernels = await getKernelMap(targets, res);
+    if (!kernels) return;
 
     const results = {};
     let successCount = 0;
     let failCount = 0;
 
-    for (const [minion, minionGrains] of Object.entries(grains)) {
-      const kernel = minionGrains?.kernel || 'Linux';
-
+    for (const [minion, kernel] of Object.entries(kernels)) {
       try {
         let cmdResult;
 

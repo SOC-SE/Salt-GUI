@@ -41,6 +41,7 @@ const filesRoutes = require('./src/routes/files');
 const logsRoutes = require('./src/routes/logs');
 const suspiciousRoutes = require('./src/routes/suspicious');
 const reportsRoutes = require('./src/routes/reports');
+const forensicsRoutes = require('./src/routes/forensics');
 
 // Initialize Express
 const app = express();
@@ -201,6 +202,9 @@ app.use('/api/suspicious', suspiciousRoutes);
 
 // Reports routes
 app.use('/api/reports', reportsRoutes);
+
+// Forensics routes
+app.use('/api/forensics', forensicsRoutes);
 
 // ============================================================
 // Error Handling

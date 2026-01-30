@@ -219,6 +219,22 @@ html, body {
   color: var(--text-secondary);
 }
 
+/* Salt Disconnected Banner */
+.disconnect-banner {
+  width: 100%;
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--status-error);
+  color: white;
+  text-align: center;
+  font-weight: 500;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.disconnect-banner.hidden {
+  display: none;
+}
+
 /* ============================================================
    Main Layout (Sidebar + Content)
    ============================================================ */
@@ -2485,4 +2501,608 @@ label {
 
 .btn-delete:hover {
   background: #d32f2f;
+}
+
+/* ============================================================
+   Forensics Panel
+   ============================================================ */
+
+.forensics-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border-color);
+  margin-bottom: var(--spacing-md);
+  flex-shrink: 0;
+}
+
+.forensics-tab {
+  padding: var(--spacing-sm) var(--spacing-md);
+  cursor: pointer;
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.forensics-tab:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.forensics-tab.active {
+  color: var(--status-info);
+  border-bottom-color: var(--status-info);
+}
+
+.forensics-tab-content {
+  display: none;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  flex: 1;
+  overflow: auto;
+}
+
+.forensics-tab-content.active {
+  display: flex;
+}
+
+.forensics-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.forensics-controls label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.forensics-level-desc {
+  padding: var(--spacing-xs) var(--spacing-md);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.forensics-section-header {
+  display: flex;
+  align-items: center;
+  padding: var(--spacing-xs) var(--spacing-md);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.forensics-jobs-list {
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.forensics-job-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+}
+
+.forensics-job-item:hover {
+  background: var(--hover-bg);
+}
+
+.forensics-job-status {
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: bold;
+}
+
+.forensics-job-status.running {
+  background: rgba(33, 150, 243, 0.2);
+  color: var(--status-info);
+}
+
+.forensics-job-status.completed {
+  background: rgba(76, 175, 80, 0.2);
+  color: var(--status-success);
+}
+
+.forensics-job-status.failed {
+  background: rgba(244, 67, 54, 0.2);
+  color: var(--status-error);
+}
+
+/* Browse & Analyze layout */
+
+.forensics-browse-layout {
+  display: flex;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border-color);
+}
+
+.forensics-browse-sidebar {
+  width: 280px;
+  min-width: 280px;
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+}
+
+.forensics-collections-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-xs);
+}
+
+.fr-tree-minion-label {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+
+.fr-tree-minion-label::before {
+  content: '> ';
+  color: var(--text-muted);
+}
+
+.fr-tree-minion-label.expanded::before {
+  content: 'v ';
+}
+
+.fr-tree-minion-label:hover {
+  background: var(--hover-bg);
+}
+
+.fr-tree-artifacts {
+  padding-left: var(--spacing-md);
+}
+
+.fr-tree-artifact {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fr-tree-artifact:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.fr-tree-artifact.selected {
+  background: var(--active-bg);
+  color: var(--status-info);
+}
+
+.forensics-cleanup-controls {
+  padding: var(--spacing-sm);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.forensics-cleanup-controls .option-group {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: 11px;
+}
+
+.forensics-browse-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  min-width: 0;
+}
+
+.forensics-browse-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.forensics-action-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.forensics-action-bar label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.forensics-action-sep {
+  color: var(--border-color);
+}
+
+.forensics-browse-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-right: auto;
+}
+
+/* File browser two-panel */
+
+.forensics-filebrowser {
+  display: flex;
+  flex: 1;
+  min-height: 300px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.forensics-filebrowser-tree {
+  width: 300px;
+  min-width: 300px;
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+}
+
+.forensics-filetree-header {
+  display: flex;
+  align-items: center;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.forensics-filetree-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-xs) 0;
+}
+
+/* Collapsible folder tree (matches scripts view pattern) */
+
+.fr-folder {
+  /* collapsed by default */
+}
+
+.fr-folder-name {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fr-folder-name::before {
+  content: "+ ";
+  color: var(--text-muted);
+}
+
+.fr-folder.expanded > .fr-folder-name::before {
+  content: "- ";
+}
+
+.fr-folder-name:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.fr-folder-contents {
+  display: none;
+}
+
+.fr-folder.expanded > .fr-folder-contents {
+  display: block;
+}
+
+.fr-tree-file {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fr-tree-file:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.fr-tree-file.selected {
+  background: var(--active-bg);
+  color: var(--status-info);
+}
+
+.forensics-filebrowser-viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.forensics-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.forensics-file-viewer-content {
+  flex: 1;
+  max-height: none;
+  overflow: auto;
+}
+
+/* Severity */
+
+.forensics-severity-bar {
+  display: flex;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.forensics-severity-count {
+  padding: 2px 8px;
+  border-radius: 2px;
+  font-size: 11px;
+  font-weight: bold;
+}
+
+.forensics-severity-count.critical {
+  background: var(--status-error);
+  color: white;
+}
+
+.forensics-severity-count.high {
+  background: #e65100;
+  color: white;
+}
+
+.forensics-severity-count.medium {
+  background: var(--status-warning);
+  color: #000;
+}
+
+.forensics-severity-count.low {
+  background: var(--status-info);
+  color: white;
+}
+
+.forensics-severity-count.info {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.forensics-findings-list {
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.forensics-finding-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+}
+
+.forensics-finding-item:hover {
+  background: var(--hover-bg);
+}
+
+.forensics-finding-severity {
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: bold;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.forensics-finding-severity.critical {
+  background: var(--status-error);
+  color: white;
+}
+
+.forensics-finding-severity.high {
+  background: #e65100;
+  color: white;
+}
+
+.forensics-finding-severity.medium {
+  background: var(--status-warning);
+  color: #000;
+}
+
+.forensics-finding-severity.low {
+  background: var(--status-info);
+  color: white;
+}
+
+.forensics-finding-severity.info {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.forensics-finding-category {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 140px;
+  flex-shrink: 0;
+}
+
+.forensics-finding-message {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.forensics-timeline-list {
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.forensics-timeline-item {
+  display: grid;
+  grid-template-columns: 160px 90px 50px 60px 70px 1fr;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-md);
+  border-bottom: 1px solid var(--border-color);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.forensics-timeline-item:hover {
+  background: var(--hover-bg);
+}
+
+.forensics-timeline-item .tl-user {
+  color: var(--status-info);
+}
+
+.forensics-timeline-item .tl-source-audit {
+  color: var(--status-warning);
+}
+
+.forensics-timeline-header {
+  display: grid;
+  grid-template-columns: 160px 90px 50px 60px 70px 1fr;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-md);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* Collect tab section grouping */
+
+.fr-collect-section {
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.fr-collect-section .forensics-section-header {
+  border: none;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 11px;
+}
+
+.fr-collect-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+}
+
+/* Independent scrollbars for file tree and file viewer */
+
+.forensics-filebrowser-tree {
+  overflow: hidden;
+}
+
+.forensics-filetree-list {
+  overflow-y: auto;
+  max-height: none;
+}
+
+.forensics-filebrowser-viewer {
+  overflow: hidden;
+}
+
+.forensics-file-viewer-content {
+  overflow-y: auto;
+  max-height: none;
+}
+
+.forensics-filebrowser {
+  height: 400px;
+  min-height: 300px;
+}
+
+.forensics-filetree-header {
+  justify-content: space-between;
+}
+
+/* Fullscreen mode for file browser */
+
+.forensics-filebrowser-fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+  background: var(--bg-primary);
+  height: 100vh !important;
+  border: none;
 }

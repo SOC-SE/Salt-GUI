@@ -320,8 +320,8 @@ router.post('/run-async', auditAction('command.run_async'), async (req, res) => 
     const jid = await saltClient.runAsync({
       client: 'local_async',
       fun: 'cmd.run',
-      tgt: targetValidation.targets,
-      tgt_type: targetValidation.targets.length > 1 ? 'list' : 'glob',
+      tgt: Array.isArray(targetValidation.targets) ? (targetValidation.targets.length > 1 ? targetValidation.targets : targetValidation.targets[0]) : targetValidation.targets,
+      tgt_type: Array.isArray(targetValidation.targets) && targetValidation.targets.length > 1 ? 'list' : 'glob',
       arg: [command],
       kwarg: {
         shell: resolvedShell,
@@ -414,6 +414,75 @@ router.post('/quick', async (req, res) => {
       details: error.message
     });
   }
+});
+
+/**
+ * GET /api/commands/stream/:jid
+ * SSE stream for async job results
+ */
+router.get('/stream/:jid', async (req, res) => {
+  const { jid } = req.params;
+
+  if (!jid || !/^[0-9]+$/.test(jid)) {
+    return res.status(400).json({ success: false, error: 'Invalid job ID' });
+  }
+
+  // Set SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive'
+  });
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  let previousKeys = new Set();
+  const startTime = Date.now();
+  const maxDuration = 10 * 60 * 1000; // 10 minutes
+  const pollInterval = 2000;
+
+  sendEvent('status', { status: 'running', jid });
+
+  const poll = setInterval(async () => {
+    try {
+      if (Date.now() - startTime > maxDuration) {
+        sendEvent('status', { status: 'timeout' });
+        clearInterval(poll);
+        res.end();
+        return;
+      }
+
+      const result = await saltClient.jobLookup(jid);
+      const currentKeys = new Set(Object.keys(result || {}));
+
+      // Send new results as they arrive
+      for (const key of currentKeys) {
+        if (!previousKeys.has(key)) {
+          sendEvent('result', { minion: key, output: result[key] });
+        }
+      }
+
+      previousKeys = currentKeys;
+
+      // If we have results and no new ones appeared in this poll, job is likely complete
+      if (currentKeys.size > 0) {
+        sendEvent('status', { status: 'complete', total: currentKeys.size });
+        clearInterval(poll);
+        res.end();
+      }
+    } catch (error) {
+      sendEvent('error', { message: error.message });
+      clearInterval(poll);
+      res.end();
+    }
+  }, pollInterval);
+
+  // Clean up on client disconnect
+  req.on('close', () => {
+    clearInterval(poll);
+  });
 });
 
 module.exports = router;

@@ -61,6 +61,11 @@
       </div>
     </header>
 
+    <!-- Salt Disconnected Banner -->
+    <div id="salt-disconnect-banner" class="disconnect-banner hidden">
+      Salt API disconnected -- commands will fail
+    </div>
+
     <!-- Main Layout -->
     <div class="main-layout">
       <!-- Sidebar Navigation -->
@@ -77,6 +82,7 @@
           <div class="nav-item" data-view="network">Network</div>
           <div class="nav-item" data-view="files">Files</div>
           <div class="nav-item" data-view="logs">Logs</div>
+          <div class="nav-item" data-view="forensics">Forensics</div>
           <div class="nav-item" data-view="suspicious">Suspicious</div>
           <div class="nav-item" data-view="passwords">User Management</div>
           <div class="nav-item" data-view="audit">Audit Log</div>
@@ -999,6 +1005,194 @@
               <h3>System Status</h3>
               <div id="system-status">
                 <div class="loading">Loading status...</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Forensics View -->
+        <div id="view-forensics" class="view hidden">
+          <div class="view-header">
+            <h2>Forensics</h2>
+          </div>
+          <!-- Tabs -->
+          <div class="forensics-tabs">
+            <div class="forensics-tab active" data-ftab="collect">Collect</div>
+            <div class="forensics-tab" data-ftab="browse">Browse & Analyze</div>
+          </div>
+
+          <!-- Tab: Collect -->
+          <div id="ftab-collect" class="forensics-tab-content active">
+            <!-- Collection Controls -->
+            <div class="fr-collect-section">
+              <div class="forensics-section-header">Collection Settings</div>
+              <div class="forensics-controls">
+                <div class="option-group">
+                  <label>Target:</label>
+                  <select id="fr-collect-target-type">
+                    <option value="selected">Selected Devices</option>
+                    <option value="single">Single Device</option>
+                    <option value="all">All Devices (*)</option>
+                  </select>
+                  <select id="fr-collect-single-target" class="hidden">
+                    <option value="">Select device...</option>
+                  </select>
+                </div>
+                <div class="option-group">
+                  <label>Level:</label>
+                  <select id="fr-collect-level">
+                    <option value="quick">Quick</option>
+                    <option value="standard" selected>Standard</option>
+                    <option value="advanced">Advanced</option>
+                    <option value="comprehensive">Comprehensive</option>
+                  </select>
+                </div>
+                <div class="option-group">
+                  <label>Timeout:</label>
+                  <input type="number" id="fr-collect-timeout" value="300" min="30" max="1800" style="width:80px;">
+                </div>
+                <label><input type="checkbox" id="fr-opt-autoinstall"> Auto-install missing tools</label>
+              </div>
+              <div id="fr-level-desc" class="forensics-level-desc">Standard: Processes, network connections, persistence mechanisms, user accounts</div>
+              <!-- Comprehensive options -->
+              <div id="fr-comprehensive-opts" class="forensics-controls hidden">
+                <label><input type="checkbox" id="fr-opt-memory"> Memory dump</label>
+                <label><input type="checkbox" id="fr-opt-volatility"> Volatility</label>
+                <label><input type="checkbox" id="fr-opt-quick"> Quick mode</label>
+                <label><input type="checkbox" id="fr-opt-skip-logs"> Skip logs</label>
+              </div>
+              <div class="forensics-controls fr-collect-actions">
+                <button id="fr-collect-btn" class="btn btn-primary">Collect</button>
+                <button id="fr-check-tools-btn" class="btn btn-small">Check Tools</button>
+              </div>
+            </div>
+            <!-- Jobs -->
+            <div class="fr-collect-section">
+              <div class="forensics-section-header">Async Jobs (Comprehensive scans only)</div>
+              <div id="fr-jobs-list" class="forensics-jobs-list">
+                <div class="loading">No jobs yet</div>
+              </div>
+            </div>
+            <!-- Output -->
+            <div class="fr-collect-section">
+              <div class="output-panel">
+                <div class="output-header">
+                  <span>Output</span>
+                  <button id="fr-collect-copy-btn" class="btn btn-small">Copy</button>
+                </div>
+                <pre id="fr-collect-output" class="output-content">No output yet.</pre>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab: Browse & Analyze -->
+          <div id="ftab-browse" class="forensics-tab-content hidden">
+            <div class="forensics-browse-layout">
+              <!-- Left sidebar: collections tree -->
+              <div class="forensics-browse-sidebar">
+                <div class="forensics-section-header">Collections</div>
+                <div id="fr-collections-tree" class="forensics-collections-tree">
+                  <div class="loading">Loading collections...</div>
+                </div>
+                <div class="forensics-cleanup-controls">
+                  <div class="option-group">
+                    <label>Cleanup older than:</label>
+                    <select id="fr-cleanup-age">
+                      <option value="0.25">15 min</option>
+                      <option value="0.5">30 min</option>
+                      <option value="1">1 hour</option>
+                      <option value="2" selected>2 hours</option>
+                      <option value="4">4 hours</option>
+                      <option value="8">8 hours (1 day)</option>
+                      <option value="16">16 hours (2 days)</option>
+                    </select>
+                  </div>
+                  <button id="fr-cleanup-btn" class="btn btn-danger btn-small">Cleanup</button>
+                </div>
+              </div>
+              <!-- Right panel -->
+              <div class="forensics-browse-main">
+                <div id="fr-browse-placeholder" class="forensics-browse-placeholder">Select a collection from the sidebar to browse its contents.</div>
+                <div id="fr-browse-content" class="hidden">
+                  <!-- Action bar -->
+                  <div class="forensics-action-bar">
+                    <span id="fr-browse-label" class="forensics-browse-label"></span>
+                    <button id="fr-run-analysis-btn" class="btn btn-primary btn-small" title="Runs 16-category live security analysis on the selected minion: checks users, SSH keys, cron jobs, services, rootkit indicators, SUID binaries, hidden files, network connections, PAM config, webshells, and more. Results appear in the Findings section below.">Run Analysis</button>
+                    <button id="fr-retrieve-btn" class="btn btn-small">Retrieve to Master</button>
+                    <span class="forensics-action-sep">|</span>
+                    <label><input type="checkbox" id="fr-type-rootkit" checked> Rootkit</label>
+                    <label><input type="checkbox" id="fr-type-persistence" checked> Persistence</label>
+                    <label><input type="checkbox" id="fr-type-network" checked> Network</label>
+                    <label><input type="checkbox" id="fr-type-users" checked> Users</label>
+                    <label><input type="checkbox" id="fr-type-processes" checked> Processes</label>
+                    <button id="fr-targeted-analyze-btn" class="btn btn-small">Targeted</button>
+                  </div>
+                  <!-- File browser -->
+                  <div id="fr-filebrowser" class="forensics-filebrowser">
+                    <div class="forensics-filebrowser-tree">
+                      <div class="forensics-filetree-header">
+                        <span>Files</span>
+                        <button id="fr-fullscreen-btn" class="btn btn-small" title="Toggle fullscreen">Fullscreen</button>
+                      </div>
+                      <div id="fr-filetree" class="forensics-filetree-list">
+                        <div class="loading">Loading files...</div>
+                      </div>
+                    </div>
+                    <div class="forensics-filebrowser-viewer">
+                      <div class="forensics-viewer-header">
+                        <span id="fr-file-viewer-title">No file selected</span>
+                        <button id="fr-file-copy-btn" class="btn btn-small">Copy</button>
+                      </div>
+                      <pre id="fr-file-content" class="output-content forensics-file-viewer-content">Select a file to view its contents.</pre>
+                    </div>
+                  </div>
+                  <!-- Findings -->
+                  <div id="fr-findings-section" class="hidden">
+                    <div class="forensics-section-header">
+                      <span>Findings</span>
+                      <button id="fr-load-saved-btn" class="btn btn-small" style="margin-left:var(--spacing-md);">Load Saved</button>
+                      <div class="option-group" style="margin-left:auto;">
+                        <label>Severity:</label>
+                        <select id="fr-findings-severity">
+                          <option value="">All</option>
+                          <option value="critical">Critical</option>
+                          <option value="high">High</option>
+                          <option value="medium">Medium</option>
+                          <option value="low">Low</option>
+                          <option value="info">Info</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div id="fr-severity-summary" class="forensics-severity-bar hidden"></div>
+                    <div id="fr-findings-list" class="forensics-findings-list">
+                      <div class="loading">No findings</div>
+                    </div>
+                  </div>
+                  <!-- Timeline -->
+                  <div id="fr-timeline-section" class="hidden">
+                    <div class="forensics-section-header">
+                      Timeline
+                      <div class="option-group" style="display:inline-flex;margin-left:var(--spacing-md);">
+                        <label>Limit:</label>
+                        <input type="number" id="fr-timeline-limit" value="100" min="10" max="1000" style="width:80px;">
+                        <button id="fr-load-timeline-btn" class="btn btn-small">Load Filesystem</button>
+                        <button id="fr-load-audit-timeline-btn" class="btn btn-small">Load Audit Log</button>
+                        <button id="fr-enable-audit-btn" class="btn btn-small" title="Deploy auditd file-watch rules on the selected minion to track who modifies critical files. Rules persist until reboot or manual removal.">Enable Audit Watches</button>
+                      </div>
+                    </div>
+                    <div id="fr-timeline-list" class="forensics-timeline-list">
+                      <div class="loading">Click Load to view timeline</div>
+                    </div>
+                  </div>
+                  <!-- Metadata -->
+                  <div id="fr-metadata-section" class="hidden">
+                    <div class="forensics-section-header">
+                      Metadata
+                      <button id="fr-load-metadata-btn" class="btn btn-small" style="margin-left:var(--spacing-md);">Load</button>
+                    </div>
+                    <pre id="fr-metadata-content" class="output-content" style="max-height:200px;">No metadata loaded.</pre>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

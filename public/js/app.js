@@ -74,17 +74,20 @@
   // ============================================================
 
   async function api(endpoint, options = {}) {
+    const { signal, ...restOptions } = options;
     const url = API_BASE + endpoint;
     const defaultOptions = {
       credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json',
-        ...options.headers
+        ...restOptions.headers
       }
     };
 
     try {
-      const response = await fetch(url, { ...defaultOptions, ...options });
+      const fetchOptions = { ...defaultOptions, ...restOptions };
+      if (signal) fetchOptions.signal = signal;
+      const response = await fetch(url, fetchOptions);
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
@@ -93,6 +96,9 @@
 
       return data;
     } catch (error) {
+      if (error.name === 'AbortError') {
+        throw error;
+      }
       if (error.name === 'TypeError') {
         throw new Error('Network error - server may be unreachable');
       }
@@ -300,6 +306,7 @@
 
   async function checkSaltConnection() {
     const statusEl = document.getElementById('connection-status');
+    const bannerEl = document.getElementById('salt-disconnect-banner');
 
     try {
       const health = await api('/api/health');
@@ -307,13 +314,16 @@
       if (health.salt.status === 'connected') {
         statusEl.textContent = 'Connected';
         statusEl.className = 'status-badge status-connected';
+        if (bannerEl) bannerEl.classList.add('hidden');
       } else {
         statusEl.textContent = 'Disconnected';
         statusEl.className = 'status-badge status-disconnected';
+        if (bannerEl) bannerEl.classList.remove('hidden');
       }
     } catch (error) {
       statusEl.textContent = 'Error';
       statusEl.className = 'status-badge status-disconnected';
+      if (bannerEl) bannerEl.classList.remove('hidden');
     }
   }
 
@@ -404,6 +414,11 @@
         break;
       case 'keys':
         loadKeys();
+        break;
+      case 'forensics':
+        populateSingleDeviceSelects();
+        populateForensicsTargetSelects();
+        loadForensicsJobs();
         break;
     }
   }
@@ -694,7 +709,93 @@
     }
   }
 
+  // ============================================================
+  // Command History (localStorage)
+  // ============================================================
+
+  const CMD_HISTORY_KEY = 'salt-gui-cmd-history';
+  const CMD_HISTORY_MAX = 50;
+  let cmdHistoryIndex = -1;
+  let cmdHistoryTemp = '';
+
+  function getCmdHistory() {
+    try {
+      return JSON.parse(localStorage.getItem(CMD_HISTORY_KEY)) || [];
+    } catch { return []; }
+  }
+
+  function addCmdHistory(command, shell) {
+    const history = getCmdHistory();
+    history.unshift({ command, shell, timestamp: Date.now() });
+    if (history.length > CMD_HISTORY_MAX) history.length = CMD_HISTORY_MAX;
+    localStorage.setItem(CMD_HISTORY_KEY, JSON.stringify(history));
+    cmdHistoryIndex = -1;
+  }
+
+  function navigateCmdHistory(direction) {
+    const input = document.getElementById('cmd-input');
+    const history = getCmdHistory();
+    if (history.length === 0) return;
+
+    if (direction === 'up') {
+      if (cmdHistoryIndex === -1) cmdHistoryTemp = input.value;
+      if (cmdHistoryIndex < history.length - 1) {
+        cmdHistoryIndex++;
+        input.value = history[cmdHistoryIndex].command;
+      }
+    } else {
+      if (cmdHistoryIndex > 0) {
+        cmdHistoryIndex--;
+        input.value = history[cmdHistoryIndex].command;
+      } else if (cmdHistoryIndex === 0) {
+        cmdHistoryIndex = -1;
+        input.value = cmdHistoryTemp;
+      }
+    }
+  }
+
+  // ============================================================
+  // Command Execution State (cancel, timer)
+  // ============================================================
+
+  let activeCommandAbort = null;
+  let activeCommandTimer = null;
+  let activeEventSource = null;
+
+  function setCommandRunning(running) {
+    const btn = document.getElementById('cmd-execute-btn');
+    if (running) {
+      btn.textContent = 'Cancel';
+      btn.classList.remove('btn-primary');
+      btn.classList.add('btn-danger');
+    } else {
+      btn.textContent = 'Execute';
+      btn.classList.remove('btn-danger');
+      btn.classList.add('btn-primary');
+      if (activeCommandTimer) { clearInterval(activeCommandTimer); activeCommandTimer = null; }
+      activeCommandAbort = null;
+    }
+  }
+
+  function startElapsedTimer(outputEl) {
+    const startTime = Date.now();
+    outputEl.textContent = 'Executing... (0s)';
+    activeCommandTimer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      outputEl.textContent = `Executing... (${elapsed}s)`;
+    }, 1000);
+  }
+
   async function executeCommand() {
+    // If already running, cancel
+    if (activeCommandAbort) {
+      activeCommandAbort.abort();
+      if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+      setCommandRunning(false);
+      document.getElementById('cmd-output').textContent += '\n[Cancelled]';
+      return;
+    }
+
     const command = document.getElementById('cmd-input').value.trim();
     const outputEl = document.getElementById('cmd-output');
     const shell = document.getElementById('cmd-shell').value;
@@ -713,11 +814,19 @@
       return;
     }
 
-    outputEl.textContent = 'Executing command...';
+    // Save to history
+    addCmdHistory(command, shell);
 
+    const abortController = new AbortController();
+    activeCommandAbort = abortController;
+    setCommandRunning(true);
+    startElapsedTimer(outputEl);
+
+    // Try SSE streaming first, fall back to synchronous
     try {
-      const result = await api('/api/commands/run', {
+      const asyncResult = await api('/api/commands/run-async', {
         method: 'POST',
+        signal: abortController.signal,
         body: JSON.stringify({
           targets,
           command,
@@ -725,6 +834,35 @@
           timeout: parseInt(timeout)
         })
       });
+
+      if (asyncResult.jid) {
+        // Stream results via SSE
+        await streamCommandResults(asyncResult.jid, outputEl, abortController);
+        setCommandRunning(false);
+        return;
+      }
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        setCommandRunning(false);
+        return;
+      }
+      // SSE/async failed, fall back to synchronous
+    }
+
+    // Synchronous fallback
+    try {
+      const result = await api('/api/commands/run', {
+        method: 'POST',
+        signal: abortController.signal,
+        body: JSON.stringify({
+          targets,
+          command,
+          shell: shell === 'auto' ? undefined : shell,
+          timeout: parseInt(timeout)
+        })
+      });
+
+      if (activeCommandTimer) clearInterval(activeCommandTimer);
 
       let output = '';
       for (const [minion, data] of Object.entries(result.results)) {
@@ -742,9 +880,66 @@
 
       showToast(`Command executed on ${result.summary.total} devices`, 'success');
     } catch (error) {
-      outputEl.textContent = `Error: ${error.message}`;
-      showToast('Command execution failed', 'error');
+      if (error.name === 'AbortError') {
+        // Already handled
+      } else {
+        if (activeCommandTimer) clearInterval(activeCommandTimer);
+        outputEl.textContent = `Error: ${error.message}`;
+        showToast('Command execution failed', 'error');
+      }
     }
+    setCommandRunning(false);
+  }
+
+  function streamCommandResults(jid, outputEl, abortController) {
+    return new Promise((resolve, reject) => {
+      const url = `${API_BASE}/api/commands/stream/${jid}`;
+      const es = new EventSource(url, { withCredentials: true });
+      activeEventSource = es;
+      let output = '';
+      let minionCount = 0;
+
+      es.addEventListener('result', (e) => {
+        const data = JSON.parse(e.data);
+        minionCount++;
+        output += `-- ${data.minion} -----------------------------------------------\n`;
+        output += `${data.output}\n\n`;
+        if (activeCommandTimer) clearInterval(activeCommandTimer);
+        outputEl.textContent = output + `[${minionCount} minion(s) reported]`;
+      });
+
+      es.addEventListener('status', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.status === 'complete' || data.status === 'timeout') {
+          if (activeCommandTimer) clearInterval(activeCommandTimer);
+          outputEl.textContent = output + `\n[${minionCount} minion(s) completed]`;
+          es.close();
+          activeEventSource = null;
+          showToast(`Command completed on ${minionCount} devices`, 'success');
+          resolve();
+        }
+      });
+
+      es.addEventListener('error', (e) => {
+        es.close();
+        activeEventSource = null;
+        reject(new Error('SSE stream error'));
+      });
+
+      es.onerror = () => {
+        es.close();
+        activeEventSource = null;
+        // Don't reject - fall back handled by caller
+        resolve();
+      };
+
+      // Handle abort
+      abortController.signal.addEventListener('abort', () => {
+        es.close();
+        activeEventSource = null;
+        resolve();
+      });
+    });
   }
 
   // ============================================================
@@ -888,7 +1083,16 @@
 
     const args = argsEl.value.trim().split(/\s+/).filter(a => a);
 
-    outputEl.textContent = 'Executing script...';
+    const executeBtn = document.getElementById('script-execute-btn');
+    executeBtn.disabled = true;
+    executeBtn.textContent = 'Executing...';
+
+    const startTime = Date.now();
+    outputEl.textContent = 'Executing... (0s)';
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      outputEl.textContent = `Executing... (${elapsed}s)`;
+    }, 1000);
 
     try {
       const result = await api('/api/scripts/run', {
@@ -899,6 +1103,8 @@
           args
         })
       });
+
+      clearInterval(timer);
 
       let output = '';
       for (const [minion, data] of Object.entries(result.results)) {
@@ -916,8 +1122,12 @@
 
       showToast(`Script executed on ${result.summary.total} devices`, 'success');
     } catch (error) {
+      clearInterval(timer);
       outputEl.textContent = `Error: ${error.message}`;
       showToast('Script execution failed', 'error');
+    } finally {
+      executeBtn.disabled = false;
+      executeBtn.textContent = 'Execute Script';
     }
   }
 
@@ -3220,6 +3430,733 @@
   }
 
   // ============================================================
+  // Forensics
+  // ============================================================
+
+  let forensicsActiveTab = 'collect';
+  let forensicsBrowseState = {
+    selectedMinion: null,
+    selectedArtifact: null,
+    fileList: [],
+    currentPath: '/',
+    findings: [],
+    allFindings: []
+  };
+
+  const forensicsLevelDescs = {
+    quick: 'Quick: Basic system info snapshot — hostname, OS, uptime, IP addresses',
+    standard: 'Standard: Processes, network connections, persistence mechanisms, user accounts',
+    advanced: 'Advanced: + file hashing, file timeline, rootkit checks',
+    comprehensive: 'Comprehensive: + memory dump, Volatility analysis, YARA scanning'
+  };
+
+  function switchForensicsTab(tabName) {
+    forensicsActiveTab = tabName;
+    document.querySelectorAll('.forensics-tab').forEach(t => t.classList.toggle('active', t.dataset.ftab === tabName));
+    document.querySelectorAll('.forensics-tab-content').forEach(c => {
+      const isActive = c.id === `ftab-${tabName}`;
+      c.classList.toggle('active', isActive);
+      c.classList.toggle('hidden', !isActive);
+    });
+    if (tabName === 'browse') loadForensicsCollectionsTree();
+  }
+
+  function populateForensicsTargetSelects() {
+    const selects = ['fr-collect-single-target'];
+    const onlineDevices = state.devices.filter(d => d.status === 'online');
+    selects.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const val = el.value;
+      el.innerHTML = '<option value="">Select device...</option>' + onlineDevices.map(d => `<option value="${escapeHtml(d.id)}">${escapeHtml(d.id)}</option>`).join('');
+      if (val) el.value = val;
+    });
+  }
+
+  function getForensicsCollectTargets() {
+    const type = document.getElementById('fr-collect-target-type').value;
+    if (type === 'all') return '*';
+    if (type === 'single') return document.getElementById('fr-collect-single-target').value;
+    const selected = Array.from(state.selectedDevices);
+    return selected.length > 0 ? selected : null;
+  }
+
+  async function forensicsCheckTools() {
+    const targets = getForensicsCollectTargets();
+    if (!targets || (Array.isArray(targets) && targets.length === 0)) {
+      showToast('Select targets first', 'error');
+      return;
+    }
+    const outputEl = document.getElementById('fr-collect-output');
+    outputEl.textContent = 'Checking installed forensics tools...';
+    const toolsList = [
+      'tar', 'gzip', 'find', 'ss', 'netstat', 'lsof', 'ps',
+      'sha256sum', 'md5sum', 'strings', 'strace', 'ltrace',
+      'tcpdump', 'auditctl', 'ausearch', 'rkhunter', 'chkrootkit',
+      'debsums', 'aide', 'yara', 'volatility', 'volatility3',
+      'clamav', 'clamscan', 'freshclam'
+    ];
+    const cmd = toolsList.map(t => `printf "%-18s %s\\n" "${t}" "$(which ${t} 2>/dev/null && echo OK || echo MISSING)"`).join(' && ') +
+      ` && echo "" && INSTALLED=0 && MISSING="" && for t in ${toolsList.join(' ')}; do if which "$t" >/dev/null 2>&1; then INSTALLED=$((INSTALLED+1)); else MISSING="$MISSING $t"; fi; done && echo "Installed: $INSTALLED/${toolsList.length}" && if [ -n "$MISSING" ]; then echo "Missing:$MISSING"; fi`;
+
+    try {
+      const result = await api('/api/commands/run', {
+        method: 'POST',
+        body: JSON.stringify({ targets, command: cmd, shell: 'bash', timeout: 30 })
+      });
+      if (result.success) {
+        let out = '';
+        const results = result.results || {};
+        for (const [minion, data] of Object.entries(results)) {
+          out += `── ${minion} ──────────────────────────────\n`;
+          let stdout = '';
+          if (typeof data === 'string') {
+            stdout = data;
+          } else if (data && typeof data === 'object') {
+            stdout = data.output || data.stdout || data.return || '';
+            if (!stdout && typeof stdout !== 'string') stdout = JSON.stringify(data, null, 2);
+          }
+          out += stdout + '\n\n';
+        }
+        outputEl.textContent = out || 'No results';
+      } else {
+        outputEl.textContent = `Error: ${result.error || 'Unknown'}`;
+      }
+    } catch (error) {
+      outputEl.textContent = `Error: ${error.message}`;
+    }
+  }
+
+  async function forensicsCollect() {
+    const targets = getForensicsCollectTargets();
+    if (!targets || (Array.isArray(targets) && targets.length === 0)) {
+      showToast('Select targets first', 'error');
+      return;
+    }
+    const level = document.getElementById('fr-collect-level').value;
+    const timeout = parseInt(document.getElementById('fr-collect-timeout').value) || 300;
+    const outputEl = document.getElementById('fr-collect-output');
+    outputEl.textContent = 'Starting collection...';
+
+    const body = { targets, timeout };
+    let endpoint = '/api/forensics/collect';
+
+    if (level === 'quick') {
+      endpoint = '/api/forensics/quick-collect';
+    } else if (level === 'advanced') {
+      endpoint = '/api/forensics/advanced';
+    } else if (level === 'comprehensive') {
+      endpoint = '/api/forensics/comprehensive';
+      if (document.getElementById('fr-opt-memory').checked) body.memory_dump = true;
+      if (document.getElementById('fr-opt-volatility').checked) body.volatility = true;
+      if (document.getElementById('fr-opt-quick').checked) body.quick_mode = true;
+      if (document.getElementById('fr-opt-skip-logs').checked) body.skip_logs = true;
+    } else {
+      body.level = level;
+    }
+
+    try {
+      const result = await api(endpoint, { method: 'POST', body: JSON.stringify(body) });
+      // Async job (comprehensive) — has jid but no inline results
+      const asyncId = result.jid ? result.collection_id : result.job_id;
+      if (result.success && asyncId && !result.results) {
+        outputEl.textContent = `Job started: ${asyncId}`;
+        showToast('Collection started', 'success');
+        pollForensicsJob(asyncId);
+        loadForensicsJobs();
+      } else if (result.success) {
+        // Synchronous collection (quick/standard/advanced return inline results)
+        let out = result.message || 'Collection complete';
+        if (result.results) {
+          out = formatForensicsResults(result.results);
+        }
+        if (result.tarball) out += `\nTarball: ${result.tarball}`;
+        outputEl.textContent = out;
+        showToast('Collection complete', 'success');
+        loadForensicsJobs();
+      } else {
+        outputEl.textContent = `Error: ${result.error || 'Unknown'}`;
+      }
+    } catch (error) {
+      outputEl.textContent = `Error: ${error.message}`;
+      showToast('Collection failed', 'error');
+    }
+  }
+
+  async function pollForensicsJob(jobId) {
+    const outputEl = document.getElementById('fr-collect-output');
+    const poll = async () => {
+      try {
+        const result = await api(`/api/forensics/status/${jobId}`);
+        const status = result.status || (result.job && result.job.status) || 'unknown';
+        const results = result.results || (result.job && result.job.results);
+        const error = result.error || (result.job && result.job.error);
+        if (status === 'completed' && results) {
+          outputEl.textContent = formatForensicsResults(results);
+          loadForensicsJobs();
+          showToast('Collection complete', 'success');
+          return;
+        } else if (status === 'failed') {
+          outputEl.textContent = `Job failed: ${error || 'Unknown error'}`;
+          loadForensicsJobs();
+          showToast('Collection failed', 'error');
+          return;
+        }
+        const elapsed = result.elapsed_ms ? ` (${Math.round(result.elapsed_ms / 1000)}s)` : '';
+        outputEl.textContent = `Job ${jobId}: ${status}${elapsed}`;
+        setTimeout(poll, 3000);
+      } catch (err) {
+        outputEl.textContent = `Poll error: ${err.message}`;
+      }
+    };
+    setTimeout(poll, 2000);
+  }
+
+  function formatForensicsResults(results) {
+    if (!results) return 'No results';
+    let out = '';
+    for (const [minion, output] of Object.entries(results)) {
+      out += `── ${minion} ──────────────────────────────\n`;
+      out += (typeof output === 'string' ? output : JSON.stringify(output, null, 2)) + '\n\n';
+    }
+    return out || 'No results';
+  }
+
+  async function loadForensicsJobs() {
+    const listEl = document.getElementById('fr-jobs-list');
+    try {
+      const result = await api('/api/forensics/jobs');
+      if (result.success && result.jobs && result.jobs.length > 0) {
+        listEl.innerHTML = result.jobs.map(job => {
+          const jobKey = job.collection_id || job.id || job.jid || '';
+          const jobType = job.type || job.level || '';
+          const jobTime = job.started_at || job.created;
+          const elapsed = job.elapsed_ms ? `${Math.round(job.elapsed_ms / 1000)}s` : '';
+          return `
+          <div class="forensics-job-item">
+            <span class="forensics-job-status ${job.status}">${job.status}</span>
+            <span>${escapeHtml(jobType)}</span>
+            <span class="forensics-job-id">${escapeHtml(jobKey)}</span>
+            <span style="color:var(--text-muted);font-size:11px;">${jobTime ? new Date(jobTime).toLocaleTimeString() : ''} ${elapsed}</span>
+            <button class="btn btn-small fr-job-view-btn" data-jobid="${escapeHtml(jobKey)}">View</button>
+          </div>`;
+        }).join('');
+        listEl.querySelectorAll('.fr-job-view-btn').forEach(btn => {
+          btn.addEventListener('click', () => viewForensicsJob(btn.dataset.jobid));
+        });
+      } else {
+        listEl.innerHTML = '<div class="loading">No jobs yet</div>';
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function viewForensicsJob(collectionId) {
+    const outputEl = document.getElementById('fr-collect-output');
+    outputEl.textContent = 'Loading...';
+    try {
+      const d = await api(`/api/forensics/status/${collectionId}`);
+      if (d.results) {
+        // Completed job with inline results
+        outputEl.textContent = formatForensicsResults(d.results);
+      } else if (d.job && d.job.results) {
+        outputEl.textContent = formatForensicsResults(d.job.results);
+      } else {
+        const status = d.status || (d.job ? d.job.status : 'unknown');
+        outputEl.textContent = `Status: ${status}`;
+        if (status === 'running') {
+          const elapsed = d.elapsed_ms ? ` (${Math.round(d.elapsed_ms / 1000)}s elapsed)` : '';
+          outputEl.textContent += elapsed;
+        }
+      }
+    } catch (error) {
+      outputEl.textContent = `Error: ${error.message}`;
+    }
+  }
+
+  // Browse & Analyze tab
+
+  async function loadForensicsCollectionsTree() {
+    const treeEl = document.getElementById('fr-collections-tree');
+    treeEl.innerHTML = '<div class="loading">Loading collections...</div>';
+    try {
+      const result = await api('/api/forensics/collections');
+      if (!result.success) {
+        treeEl.innerHTML = '<div class="loading">Failed to load</div>';
+        return;
+      }
+      const collections = result.collections;
+      if (!collections || (Array.isArray(collections) ? collections.length === 0 : Object.keys(collections).length === 0)) {
+        treeEl.innerHTML = '<div class="loading">No collections found</div>';
+        return;
+      }
+      // Group by minion — collections is an array of {minion, path, ...}
+      const grouped = {};
+      if (Array.isArray(collections)) {
+        for (const c of collections) {
+          if (!grouped[c.minion]) grouped[c.minion] = [];
+          grouped[c.minion].push(c.path);
+        }
+      } else {
+        for (const [minion, output] of Object.entries(collections)) {
+          grouped[minion] = typeof output === 'string' ? output.split('\n').filter(l => l.trim()) : [];
+        }
+      }
+      let html = '';
+      for (const [minion, artifacts] of Object.entries(grouped)) {
+        html += `<div class="fr-tree-minion" data-minion="${escapeHtml(minion)}">
+          <div class="fr-tree-minion-label">${escapeHtml(minion)}</div>
+          <div class="fr-tree-artifacts hidden">
+            ${artifacts.length > 0 ? artifacts.map(a => {
+              const name = a.trim().split('/').pop();
+              return `<div class="fr-tree-artifact" data-minion="${escapeHtml(minion)}" data-path="${escapeHtml(a.trim())}">${escapeHtml(name)}</div>`;
+            }).join('') : '<div class="loading" style="font-size:11px;">No artifacts</div>'}
+          </div>
+        </div>`;
+      }
+      treeEl.innerHTML = html;
+
+      // Delegated event listener for collections tree
+      treeEl.onclick = (e) => {
+        const label = e.target.closest('.fr-tree-minion-label');
+        if (label) {
+          const sub = label.parentElement.querySelector('.fr-tree-artifacts');
+          sub.classList.toggle('hidden');
+          label.classList.toggle('expanded');
+          return;
+        }
+        const artifact = e.target.closest('.fr-tree-artifact');
+        if (artifact) {
+          selectForensicsCollection(artifact.dataset.minion, artifact.dataset.path);
+        }
+      };
+    } catch (error) {
+      treeEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  async function selectForensicsCollection(minion, artifactPath) {
+    forensicsBrowseState.selectedMinion = minion;
+    forensicsBrowseState.selectedArtifact = artifactPath;
+    forensicsBrowseState.currentPath = '/';
+    forensicsBrowseState.allFindings = [];
+    forensicsBrowseState.findings = [];
+
+    // Highlight selection
+    document.querySelectorAll('.fr-tree-artifact').forEach(el => el.classList.remove('selected'));
+    document.querySelector(`.fr-tree-artifact[data-path="${CSS.escape(artifactPath)}"]`)?.classList.add('selected');
+
+    // Show content panel
+    document.getElementById('fr-browse-placeholder').classList.add('hidden');
+    document.getElementById('fr-browse-content').classList.remove('hidden');
+    document.getElementById('fr-browse-label').textContent = `${minion} / ${artifactPath.split('/').pop()}`;
+
+    // Hide findings/timeline/metadata until requested
+    document.getElementById('fr-findings-section').classList.add('hidden');
+    document.getElementById('fr-timeline-section').classList.add('hidden');
+    document.getElementById('fr-metadata-section').classList.add('hidden');
+
+    // Load file list
+    const filetreeEl = document.getElementById('fr-filetree');
+    filetreeEl.innerHTML = '<div class="loading">Loading contents...</div>';
+    document.getElementById('fr-file-content').textContent = 'Select a file to view its contents.';
+    document.getElementById('fr-file-viewer-title').textContent = 'No file selected';
+
+    try {
+      const result = await api('/api/forensics/artifact-contents', {
+        method: 'POST',
+        body: JSON.stringify({ target: minion, artifact_path: artifactPath })
+      });
+      if (result.success) {
+        // Handle both formats: { contents: { files: [...] } } and { files: { minion: [...] } }
+        let files;
+        if (result.contents && result.contents.files) {
+          files = result.contents.files;
+        } else if (result.files) {
+          files = result.files[minion] || result.files[Object.keys(result.files)[0]] || [];
+        } else {
+          files = [];
+        }
+        forensicsBrowseState.fileList = files;
+        forensicsBrowseState.currentPath = '/';
+        renderForensicsFiletree();
+      }
+    } catch (error) {
+      filetreeEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function buildFileTreeStructure(flatFiles) {
+    // Convert flat file list into nested tree structure
+    const root = { name: '/', children: {}, files: [] };
+    for (const f of flatFiles) {
+      const clean = f.replace(/^\.\//, '').replace(/\/$/, '');
+      if (!clean) continue;
+      const parts = clean.split('/');
+      let node = root;
+      for (let i = 0; i < parts.length; i++) {
+        if (i === parts.length - 1) {
+          // Check if this is a directory entry (original path ended with /)
+          if (f.endsWith('/')) {
+            if (!node.children[parts[i]]) node.children[parts[i]] = { name: parts[i], children: {}, files: [] };
+          } else {
+            node.files.push({ name: parts[i], path: clean });
+          }
+        } else {
+          if (!node.children[parts[i]]) node.children[parts[i]] = { name: parts[i], children: {}, files: [] };
+          node = node.children[parts[i]];
+        }
+      }
+    }
+    return root;
+  }
+
+  function renderTreeNode(node, depth = 0) {
+    let html = '';
+    // Sort directories first, then files
+    const dirs = Object.values(node.children).sort((a, b) => a.name.localeCompare(b.name));
+    const files = (node.files || []).sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const dir of dirs) {
+      const hasContent = Object.keys(dir.children).length > 0 || dir.files.length > 0;
+      if (!hasContent) continue;
+      html += `<div class="fr-folder">`;
+      html += `<div class="fr-folder-name" style="padding-left:${depth * 16 + 8}px">${escapeHtml(dir.name)}</div>`;
+      html += `<div class="fr-folder-contents">${renderTreeNode(dir, depth + 1)}</div>`;
+      html += `</div>`;
+    }
+    for (const file of files) {
+      html += `<div class="fr-tree-file" data-filepath="${escapeHtml(file.path)}" style="padding-left:${depth * 16 + 8}px">${escapeHtml(file.name)}</div>`;
+    }
+    return html;
+  }
+
+  function renderForensicsFiletree() {
+    const files = forensicsBrowseState.fileList;
+    const filetreeEl = document.getElementById('fr-filetree');
+
+    if (!files || files.length === 0) {
+      filetreeEl.innerHTML = '<div class="loading">No files found</div>';
+      return;
+    }
+
+    const tree = buildFileTreeStructure(files);
+    const html = renderTreeNode(tree);
+    filetreeEl.innerHTML = html || '<div class="loading">Empty archive</div>';
+
+    // Single delegated event listener for the entire tree
+    filetreeEl.onclick = (e) => {
+      const folderName = e.target.closest('.fr-folder-name');
+      if (folderName) {
+        folderName.parentElement.classList.toggle('expanded');
+        return;
+      }
+      const fileEl = e.target.closest('.fr-tree-file');
+      if (fileEl) {
+        const prev = filetreeEl.querySelector('.fr-tree-file.selected');
+        if (prev) prev.classList.remove('selected');
+        fileEl.classList.add('selected');
+        viewForensicsFile(fileEl.dataset.filepath);
+      }
+    };
+  }
+
+  async function viewForensicsFile(filePath) {
+    const contentEl = document.getElementById('fr-file-content');
+    const titleEl = document.getElementById('fr-file-viewer-title');
+    titleEl.textContent = filePath;
+    contentEl.textContent = 'Loading...';
+
+    try {
+      const result = await api('/api/forensics/artifact-file', {
+        method: 'POST',
+        body: JSON.stringify({
+          target: forensicsBrowseState.selectedMinion,
+          artifact_path: forensicsBrowseState.selectedArtifact,
+          file_path: filePath
+        })
+      });
+      if (result.success) {
+        let content;
+        if (typeof result.content === 'string') {
+          content = result.content;
+        } else if (result.content && typeof result.content === 'object') {
+          const t = forensicsBrowseState.selectedMinion;
+          content = result.content[t] || result.content[Object.keys(result.content)[0]] || '';
+        } else {
+          content = '';
+        }
+        contentEl.textContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+      }
+    } catch (error) {
+      contentEl.textContent = `Error: ${error.message}`;
+    }
+  }
+
+  async function retrieveArtifact(target, artifactPath) {
+    try {
+      const result = await api('/api/forensics/retrieve', {
+        method: 'POST',
+        body: JSON.stringify({ target, artifact_path: artifactPath })
+      });
+      showToast(result.success ? 'Artifact retrieved to master' : (result.error || 'Failed'), result.success ? 'success' : 'error');
+    } catch (error) {
+      showToast(`Retrieve failed: ${error.message}`, 'error');
+    }
+  }
+
+  async function forensicsCleanup() {
+    const age = parseInt(document.getElementById('fr-cleanup-age').value) || 24;
+    showConfirmModal('Cleanup Artifacts', `Delete forensic artifacts older than ${age} hours?`, async () => {
+      try {
+        const result = await api('/api/forensics/cleanup', {
+          method: 'POST',
+          body: JSON.stringify({ age_hours: age })
+        });
+        showToast(result.success ? 'Cleanup complete' : (result.error || 'Failed'), result.success ? 'success' : 'error');
+        if (result.success) loadForensicsCollectionsTree();
+      } catch (error) {
+        showToast(`Cleanup failed: ${error.message}`, 'error');
+      }
+    });
+  }
+
+  async function forensicsRunAnalysis() {
+    const target = forensicsBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+
+    const findingsSection = document.getElementById('fr-findings-section');
+    const findingsEl = document.getElementById('fr-findings-list');
+    const summaryEl = document.getElementById('fr-severity-summary');
+    findingsSection.classList.remove('hidden');
+    document.getElementById('fr-timeline-section').classList.remove('hidden');
+    document.getElementById('fr-metadata-section').classList.remove('hidden');
+    findingsEl.innerHTML = '<div class="loading">Running analysis...</div>';
+    summaryEl.classList.add('hidden');
+
+    try {
+      const result = await api('/api/forensics/analyze', {
+        method: 'POST',
+        body: JSON.stringify({ target })
+      });
+      if (result.success) {
+        const all = extractFindings(result, target);
+        forensicsBrowseState.allFindings = all;
+        forensicsBrowseState.findings = all;
+        renderForensicsFindings(all, findingsEl, summaryEl);
+      }
+    } catch (error) {
+      findingsEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function extractFindings(result, target) {
+    const f = result.findings;
+    if (Array.isArray(f)) return f;
+    if (f && typeof f === 'object') return f[target] || f[Object.keys(f)[0]] || [];
+    return [];
+  }
+
+  async function forensicsTargetedAnalyze() {
+    const target = forensicsBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+    const types = [];
+    if (document.getElementById('fr-type-rootkit').checked) types.push('rootkit');
+    if (document.getElementById('fr-type-persistence').checked) types.push('persistence');
+    if (document.getElementById('fr-type-network').checked) types.push('network');
+    if (document.getElementById('fr-type-users').checked) types.push('users');
+    if (document.getElementById('fr-type-processes').checked) types.push('processes');
+
+    const findingsSection = document.getElementById('fr-findings-section');
+    const findingsEl = document.getElementById('fr-findings-list');
+    const summaryEl = document.getElementById('fr-severity-summary');
+    findingsSection.classList.remove('hidden');
+    findingsEl.innerHTML = '<div class="loading">Running targeted analysis...</div>';
+    summaryEl.classList.add('hidden');
+
+    try {
+      const result = await api('/api/forensics/analysis', {
+        method: 'POST',
+        body: JSON.stringify({ target, types })
+      });
+      if (result.success) {
+        const all = extractFindings(result, target);
+        forensicsBrowseState.allFindings = all;
+        forensicsBrowseState.findings = all;
+        renderForensicsFindings(all, findingsEl, summaryEl);
+      }
+    } catch (error) {
+      findingsEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function renderForensicsFindings(findings, listEl, summaryEl) {
+    if (!findings || findings.length === 0) {
+      listEl.innerHTML = '<div class="loading">No findings</div>';
+      summaryEl.classList.add('hidden');
+      return;
+    }
+
+    const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+    findings.forEach(f => { const s = (f.severity || '').toLowerCase(); counts[s] = (counts[s] || 0) + 1; });
+    summaryEl.classList.remove('hidden');
+    summaryEl.innerHTML = Object.entries(counts)
+      .filter(([, c]) => c > 0)
+      .map(([sev, c]) => `<span class="forensics-severity-count ${sev}">${sev.toUpperCase()}: ${c}</span>`)
+      .join('');
+
+    listEl.innerHTML = findings.map(f => {
+      const sev = (f.severity || '').toLowerCase();
+      return `
+      <div class="forensics-finding-item">
+        <span class="forensics-finding-severity ${sev}">${sev}</span>
+        <span class="forensics-finding-category">${escapeHtml(f.category || '')}</span>
+        <span class="forensics-finding-message">${escapeHtml(f.message || '')}</span>
+      </div>`;
+    }).join('');
+  }
+
+  function filterForensicsFindings() {
+    const severity = document.getElementById('fr-findings-severity').value;
+    const filtered = severity ? forensicsBrowseState.allFindings.filter(f => (f.severity || '').toLowerCase() === severity) : forensicsBrowseState.allFindings;
+    forensicsBrowseState.findings = filtered;
+    renderForensicsFindings(filtered, document.getElementById('fr-findings-list'), document.getElementById('fr-severity-summary'));
+  }
+
+  async function loadForensicsFindings() {
+    const target = forensicsBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+
+    const findingsSection = document.getElementById('fr-findings-section');
+    const findingsEl = document.getElementById('fr-findings-list');
+    const summaryEl = document.getElementById('fr-severity-summary');
+    findingsSection.classList.remove('hidden');
+    findingsEl.innerHTML = '<div class="loading">Loading saved findings...</div>';
+    summaryEl.classList.add('hidden');
+
+    try {
+      const result = await api(`/api/forensics/findings/${encodeURIComponent(target)}`);
+      if (result.success) {
+        const all = extractFindings(result, target);
+        forensicsBrowseState.allFindings = all;
+        forensicsBrowseState.findings = all;
+        renderForensicsFindings(all, findingsEl, summaryEl);
+      }
+    } catch (error) {
+      findingsEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  async function loadAuditTimeline() {
+    const target = forensicsBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+    const limit = parseInt(document.getElementById('fr-timeline-limit').value) || 100;
+    const listEl = document.getElementById('fr-timeline-list');
+    listEl.innerHTML = '<div class="loading">Loading audit log...</div>';
+
+    try {
+      const result = await api('/api/commands/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          targets: [target],
+          command: `ausearch -ts recent --format text 2>/dev/null | tail -${limit} || journalctl -u auditd --no-pager -n ${limit} 2>/dev/null || echo 'No audit log available'`,
+          shell: 'bash',
+          timeout: 30
+        })
+      });
+      if (result.success && result.results) {
+        const output = result.results[target] || result.results[Object.keys(result.results)[0]] || {};
+        const text = typeof output === 'string' ? output : (output.stdout || '');
+        if (text && text.trim()) {
+          const lines = text.split('\n').filter(l => l.trim());
+          listEl.innerHTML = lines.map(l => `<div class="forensics-timeline-item"><span>${escapeHtml(l)}</span></div>`).join('');
+        } else {
+          listEl.innerHTML = '<div class="loading">No audit log data</div>';
+        }
+      }
+    } catch (error) {
+      listEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  async function enableAuditWatches() {
+    const target = forensicsBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+
+    try {
+      const result = await api('/api/commands/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          targets: [target],
+          command: `which auditctl >/dev/null 2>&1 && { auditctl -w /etc/passwd -p wa -k user_mod; auditctl -w /etc/shadow -p wa -k user_mod; auditctl -w /etc/crontab -p wa -k cron_mod; auditctl -w /etc/cron.d -p wa -k cron_mod; auditctl -w /etc/ssh/sshd_config -p wa -k ssh_mod; auditctl -w /etc/sudoers -p wa -k sudo_mod; echo 'Audit watches enabled'; } || echo 'auditctl not found - install auditd first'`,
+          shell: 'bash',
+          timeout: 15
+        })
+      });
+      if (result.success && result.results) {
+        const output = result.results[target] || result.results[Object.keys(result.results)[0]] || {};
+        const text = typeof output === 'string' ? output : (output.stdout || '');
+        showToast(text.includes('enabled') ? 'Audit watches enabled' : (text || 'Done'), text.includes('enabled') ? 'success' : 'warning');
+      }
+    } catch (error) {
+      showToast(`Error: ${error.message}`, 'error');
+    }
+  }
+
+  async function loadForensicsTimeline() {
+    const target = forensicsBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+    const limit = parseInt(document.getElementById('fr-timeline-limit').value) || 100;
+    const listEl = document.getElementById('fr-timeline-list');
+    listEl.innerHTML = '<div class="loading">Loading timeline...</div>';
+
+    try {
+      const result = await api(`/api/forensics/timeline/${encodeURIComponent(target)}?limit=${limit}`);
+      if (result.success) {
+        // timeline is a flat array from the backend
+        const entries = Array.isArray(result.timeline) ? result.timeline :
+          (result.timeline[target] || result.timeline[Object.keys(result.timeline)[0]] || []);
+        if (entries.length === 0) {
+          listEl.innerHTML = `<div class="loading">${escapeHtml(result.message || 'No timeline data')}</div>`;
+          return;
+        }
+        listEl.innerHTML = `<div class="forensics-timeline-header"><span>Modified</span><span>Mode</span><span>Owner</span><span>Size</span><span>Path</span></div>` +
+          entries.map(e => {
+            const mtime = e.mtime ? new Date(e.mtime).toLocaleString() : '';
+            return `
+            <div class="forensics-timeline-item">
+              <span>${escapeHtml(mtime)}</span>
+              <span>${escapeHtml(String(e.mode || ''))}</span>
+              <span>${escapeHtml(String(e.uid || ''))}</span>
+              <span>${formatBytes(parseInt(e.size) || 0)}</span>
+              <span>${escapeHtml(e.path || '')}</span>
+            </div>`;
+          }).join('');
+      }
+    } catch (error) {
+      listEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  async function loadForensicsMetadata() {
+    const target = forensicsBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+    const el = document.getElementById('fr-metadata-content');
+    el.textContent = 'Loading...';
+
+    try {
+      const result = await api(`/api/forensics/metadata/${encodeURIComponent(target)}`);
+      if (result.success) {
+        const meta = result.metadata[target] || result.metadata[Object.keys(result.metadata)[0]] || {};
+        el.textContent = JSON.stringify(meta, null, 2);
+      }
+    } catch (error) {
+      el.textContent = `Error: ${error.message}`;
+    }
+  }
+
+  // ============================================================
   // Event Listeners Setup
   // ============================================================
 
@@ -3250,6 +4187,15 @@
 
     // Commands
     document.getElementById('cmd-execute-btn').addEventListener('click', executeCommand);
+    document.getElementById('cmd-input').addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        navigateCmdHistory('up');
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        navigateCmdHistory('down');
+      }
+    });
     document.getElementById('cmd-clear-btn').addEventListener('click', () => {
       document.getElementById('cmd-output').textContent = 'No output yet.';
     });
@@ -3422,6 +4368,51 @@
     document.getElementById('report-security-btn').addEventListener('click', generateSecurityReport);
     document.getElementById('report-copy-btn').addEventListener('click', copyReport);
     document.getElementById('report-download-btn').addEventListener('click', downloadReport);
+
+    // Forensics
+    document.querySelectorAll('.forensics-tab').forEach(tab => {
+      tab.addEventListener('click', () => switchForensicsTab(tab.dataset.ftab));
+    });
+    document.getElementById('fr-collect-btn').addEventListener('click', forensicsCollect);
+    document.getElementById('fr-check-tools-btn').addEventListener('click', forensicsCheckTools);
+    document.getElementById('fr-collect-level').addEventListener('change', (e) => {
+      document.getElementById('fr-comprehensive-opts').classList.toggle('hidden', e.target.value !== 'comprehensive');
+      const descEl = document.getElementById('fr-level-desc');
+      if (descEl) descEl.textContent = forensicsLevelDescs[e.target.value] || '';
+    });
+    document.getElementById('fr-collect-target-type').addEventListener('change', (e) => {
+      document.getElementById('fr-collect-single-target').classList.toggle('hidden', e.target.value !== 'single');
+    });
+    document.getElementById('fr-collect-copy-btn').addEventListener('click', () => {
+      navigator.clipboard.writeText(document.getElementById('fr-collect-output').textContent);
+      showToast('Copied', 'success');
+    });
+    document.getElementById('fr-cleanup-btn').addEventListener('click', forensicsCleanup);
+    document.getElementById('fr-retrieve-btn').addEventListener('click', () => {
+      if (forensicsBrowseState.selectedArtifact && forensicsBrowseState.selectedMinion) {
+        retrieveArtifact(forensicsBrowseState.selectedMinion, forensicsBrowseState.selectedArtifact);
+      } else {
+        showToast('Select a collection first', 'error');
+      }
+    });
+    document.getElementById('fr-run-analysis-btn').addEventListener('click', forensicsRunAnalysis);
+    document.getElementById('fr-targeted-analyze-btn').addEventListener('click', forensicsTargetedAnalyze);
+    document.getElementById('fr-file-copy-btn').addEventListener('click', () => {
+      navigator.clipboard.writeText(document.getElementById('fr-file-content').textContent);
+      showToast('Copied', 'success');
+    });
+    document.getElementById('fr-findings-severity').addEventListener('change', filterForensicsFindings);
+    document.getElementById('fr-load-saved-btn').addEventListener('click', loadForensicsFindings);
+    document.getElementById('fr-load-timeline-btn').addEventListener('click', loadForensicsTimeline);
+    document.getElementById('fr-load-audit-timeline-btn').addEventListener('click', loadAuditTimeline);
+    document.getElementById('fr-enable-audit-btn').addEventListener('click', enableAuditWatches);
+    document.getElementById('fr-load-metadata-btn').addEventListener('click', loadForensicsMetadata);
+    document.getElementById('fr-fullscreen-btn').addEventListener('click', () => {
+      const fb = document.getElementById('fr-filebrowser');
+      fb.classList.toggle('forensics-filebrowser-fullscreen');
+      const btn = document.getElementById('fr-fullscreen-btn');
+      btn.textContent = fb.classList.contains('forensics-filebrowser-fullscreen') ? 'Exit Fullscreen' : 'Fullscreen';
+    });
 
     // Theme toggle
     document.getElementById('theme-toggle-btn').addEventListener('click', toggleTheme);

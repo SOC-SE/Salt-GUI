@@ -55,3 +55,10 @@ Vagrantfile
 
 # Claude Code
 .claude/
+CLAUDE.md
+ENVIRONMENT.md
+
+# Directories to ignore
+salt-gui/
+yay/
+tests/

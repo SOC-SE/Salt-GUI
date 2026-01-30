@@ -155,24 +155,42 @@ class SaltAPIClient {
 
     logger.debug(`Salt API call: ${client}.${fun}`, { tgt, tgt_type });
 
-    try {
-      const response = await this.client.post('/run', payload, {
-        timeout
-      });
+    const maxRetries = 2;
+    const retryDelays = [1000, 2000];
+    const retryableCodes = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND']);
+    const retryableStatuses = new Set([502, 503, 504]);
 
-      const result = response.data.return?.[0];
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await this.client.post('/run', payload, {
+          timeout
+        });
 
-      // Wheel and runner clients return data in a nested format when using direct credentials
-      // Format: {"return": [{"tag": "...", "data": {"return": {...actual data...}}}]}
-      if (result?.data?.return !== undefined) {
-        return result.data.return;
+        const result = response.data.return?.[0];
+
+        // Wheel and runner clients return data in a nested format when using direct credentials
+        // Format: {"return": [{"tag": "...", "data": {"return": {...actual data...}}}]}
+        if (result?.data?.return !== undefined) {
+          return result.data.return;
+        }
+
+        return result || {};
+      } catch (error) {
+        const errCode = error.code;
+        const status = error.response?.status;
+        const isRetryable = retryableCodes.has(errCode) || retryableStatuses.has(status);
+
+        if (isRetryable && attempt < maxRetries) {
+          const delay = retryDelays[attempt];
+          logger.warn(`Salt API call ${fun} failed (${errCode || status}), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+
+        const message = error.response?.data?.return?.[0] || error.message;
+        logger.error(`Salt API error: ${fun}`, { message, status });
+        throw new Error(`Salt API error: ${message}`);
       }
-
-      return result || {};
-    } catch (error) {
-      const message = error.response?.data?.return?.[0] || error.message;
-      logger.error(`Salt API error: ${fun}`, { message, status: error.response?.status });
-      throw new Error(`Salt API error: ${message}`);
     }
   }
 
@@ -359,12 +377,14 @@ class SaltAPIClient {
       timeout
     };
 
-    const tgt_type = Array.isArray(target) ? 'list' : 'glob';
+    // Single-element arrays should use glob (they may contain patterns like '*')
+    const resolvedTarget = Array.isArray(target) && target.length === 1 ? target[0] : target;
+    const tgt_type = Array.isArray(resolvedTarget) ? 'list' : 'glob';
 
     return this.run({
       client: 'local',
       fun: 'cmd.run',
-      tgt: target,
+      tgt: resolvedTarget,
       tgt_type,
       arg: [command],
       kwarg,

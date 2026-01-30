@@ -13,7 +13,7 @@
     - Starts the service
 
 .PARAMETER MasterIP
-    The IP address or hostname of the Salt Master. Default: 192.168.56.10
+    The IP address or hostname of the Salt Master. Default: 172.20.242.20
 
 .PARAMETER MinionID
     The unique identifier for this minion. Default: system hostname
@@ -30,7 +30,7 @@
 
 .EXAMPLE
     # Non-interactive mode
-    .\Install-SaltMinion.ps1 -MasterIP "192.168.56.10" -MinionID "win-server01" -NonInteractive
+    .\Install-SaltMinion.ps1 -MasterIP "172.20.242.20" -MinionID "win-server01" -NonInteractive
 
 .EXAMPLE
     # Specify custom Salt version
@@ -57,7 +57,7 @@ param(
 )
 
 # --- Configuration ---
-$DEFAULT_MASTER_IP = "192.168.56.10"
+$DEFAULT_MASTER_IP = "172.20.242.20"
 $ErrorActionPreference = "Stop"
 
 # --- Functions ---

@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-DEFAULT_MASTER_IP="192.168.56.10"
+DEFAULT_MASTER_IP="172.20.242.20"
 SALT_VERSION="3007"
 MAX_RETRIES=3
 RETRY_DELAY=5
@@ -398,7 +398,7 @@ main() {
     # Get minion ID
     if [[ -z "$MINION_ID" ]]; then
         local default_id
-        default_id=$(hostname -f 2>/dev/null || hostname)
+        default_id=$(hostname -s 2>/dev/null || hostname)
         if [[ "$INTERACTIVE" == "true" ]]; then
             read -rp "Enter Minion ID [Default: $default_id]: " MINION_ID
         fi

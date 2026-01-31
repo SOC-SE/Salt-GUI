@@ -150,7 +150,8 @@ class SaltAPIClient {
       ...(tgt !== undefined && { tgt }),
       ...(tgt !== undefined && { tgt_type }),
       ...(arg.length > 0 && { arg }),
-      ...(Object.keys(kwarg).length > 0 && { kwarg })
+      // Wheel and runner clients expect kwargs as top-level fields, not nested in kwarg
+      ...(Object.keys(kwarg).length > 0 && (client === 'wheel' || client === 'runner' ? kwarg : { kwarg }))
     };
 
     logger.debug(`Salt API call: ${client}.${fun}`, { tgt, tgt_type });

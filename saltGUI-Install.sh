@@ -70,6 +70,49 @@ log_substep() {
     echo -e "  ${CYAN}-->${NC} $1"
 }
 
+# Progress tracking
+TOTAL_STEPS=13
+CURRENT_STEP=0
+
+log_progress() {
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    echo -e "\n${BLUE}${BOLD}[${CURRENT_STEP}/${TOTAL_STEPS}]${NC} ${BOLD}$1${NC}"
+}
+
+# Spinner for long-running commands
+# Usage: run_with_spinner "message" command arg1 arg2 ...
+run_with_spinner() {
+    local msg="$1"
+    shift
+    local spin_chars='|/-\'
+    local pid
+    local i=0
+    local elapsed=0
+
+    "$@" &>/tmp/salt-gui-install-cmd.log &
+    pid=$!
+
+    printf "  ${CYAN}-->${NC} %s... " "$msg"
+    while kill -0 "$pid" 2>/dev/null; do
+        local c=${spin_chars:i++%4:1}
+        printf "\r  ${CYAN}-->${NC} %s... %s [%ds]" "$msg" "$c" "$elapsed"
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    wait "$pid"
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        printf "\r  ${CYAN}-->${NC} %s... ${GREEN}done${NC} [%ds]      \n" "$msg" "$elapsed"
+    else
+        printf "\r  ${CYAN}-->${NC} %s... ${RED}failed${NC} [%ds]      \n" "$msg" "$elapsed"
+        echo -e "  ${RED}    Output:${NC}"
+        tail -5 /tmp/salt-gui-install-cmd.log 2>/dev/null | sed 's/^/      /'
+    fi
+    return $exit_code
+}
+
 show_banner() {
     echo -e "${BOLD}"
     echo "============================================================"
@@ -135,7 +178,7 @@ check_internet() {
 # ============================================================
 
 detect_os() {
-    log_step "Detecting Operating System"
+    log_progress "Detecting Operating System"
 
     OS_ID=""
     OS_VERSION=""
@@ -199,29 +242,27 @@ detect_os() {
 # ============================================================
 
 update_package_cache() {
-    log_substep "Updating package cache..."
-
     case "$OS_FAMILY" in
         debian)
-            apt-get update -qq
+            run_with_spinner "Updating package cache" apt-get update -qq
             ;;
         redhat)
-            $PKG_MANAGER makecache -q || true
+            run_with_spinner "Updating package cache" $PKG_MANAGER makecache -q || true
             ;;
     esac
 }
 
 install_base_packages() {
-    log_step "Installing Base Packages"
+    log_progress "Installing Base Packages"
 
     local packages="curl wget git ca-certificates gnupg"
 
     case "$OS_FAMILY" in
         debian)
-            apt-get install -y -qq $packages software-properties-common apt-transport-https lsb-release
+            run_with_spinner "Installing base packages" apt-get install -y -qq $packages software-properties-common apt-transport-https lsb-release
             ;;
         redhat)
-            $PKG_MANAGER install -y -q $packages
+            run_with_spinner "Installing base packages" $PKG_MANAGER install -y -q $packages
             # Install EPEL for additional packages on RHEL-based systems
             if [[ "$OS_ID" != "fedora" ]]; then
                 if ! rpm -q epel-release &>/dev/null; then
@@ -248,7 +289,7 @@ check_node_version() {
 }
 
 install_nodejs() {
-    log_step "Installing Node.js"
+    log_progress "Installing Node.js"
 
     if [[ "$SKIP_NODE" == "true" ]]; then
         log_info "Skipping Node.js installation (--skip-node)"
@@ -349,7 +390,7 @@ get_salt_repo_version() {
 }
 
 install_salt() {
-    log_step "Installing Salt Master and API"
+    log_progress "Installing Salt Master and API"
 
     if [[ "$SKIP_SALT" == "true" ]]; then
         log_info "Skipping Salt installation (--skip-salt)"
@@ -456,7 +497,7 @@ EOF
 }
 
 configure_salt_api() {
-    log_step "Configuring Salt API"
+    log_progress "Configuring Salt API"
 
     local salt_api_conf="/etc/salt/master.d/api.conf"
     local salt_pki_dir="/etc/salt/pki/api"
@@ -569,7 +610,7 @@ EOF
 }
 
 configure_salt_minion() {
-    log_step "Configuring Local Salt Minion"
+    log_progress "Configuring Local Salt Minion"
 
     if [[ "$INSTALL_SALT_MINION" != "true" ]]; then
         return
@@ -629,7 +670,7 @@ AUDITRULES
 }
 
 start_salt_services() {
-    log_step "Starting Salt Services"
+    log_progress "Starting Salt Services"
 
     # Enable and start salt-master
     log_substep "Starting salt-master..."
@@ -699,7 +740,7 @@ start_salt_services() {
 # ============================================================
 
 install_salt_gui() {
-    log_step "Installing Salt-GUI"
+    log_progress "Installing Salt-GUI"
 
     local source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -743,9 +784,8 @@ install_salt_gui() {
     mkdir -p "$INSTALL_DIR"/{scripts/linux,scripts/windows,states/linux,states/windows,playbooks,logs}
 
     # Install npm dependencies
-    log_substep "Installing npm dependencies..."
     cd "$INSTALL_DIR"
-    npm install --omit=dev 2>&1 | tail -5
+    run_with_spinner "Installing npm dependencies (this may take a moment)" npm install --omit=dev
 
     # Set permissions
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
@@ -756,7 +796,7 @@ install_salt_gui() {
 }
 
 configure_salt_gui() {
-    log_step "Configuring Salt-GUI"
+    log_progress "Configuring Salt-GUI"
 
     local config_dir="$INSTALL_DIR/config"
 
@@ -827,7 +867,7 @@ EOF
 }
 
 create_systemd_service() {
-    log_step "Creating Systemd Service"
+    log_progress "Creating Systemd Service"
 
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
@@ -870,7 +910,7 @@ EOF
 }
 
 start_salt_gui() {
-    log_step "Starting Salt-GUI"
+    log_progress "Starting Salt-GUI"
 
     log_substep "Enabling and starting service..."
     systemctl enable "$SERVICE_NAME" --now 2>/dev/null || {
@@ -895,7 +935,7 @@ start_salt_gui() {
 # ============================================================
 
 configure_firewall() {
-    log_step "Configuring Firewall"
+    log_progress "Configuring Firewall"
 
     # Check for firewalld (RHEL-based)
     if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then

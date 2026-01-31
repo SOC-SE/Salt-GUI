@@ -202,7 +202,7 @@ setup_rpm_repo() {
     cat > /etc/yum.repos.d/salt.repo <<EOF
 [saltproject-repo]
 name=Salt Project Repository
-baseurl=https://packages.broadcom.com/artifactory/saltproject-rpm/rhel/${el_version}/x86_64/${SALT_VERSION}/
+baseurl=https://packages.broadcom.com/artifactory/saltproject-rpm/
 enabled=1
 gpgcheck=1
 gpgkey=https://packages.broadcom.com/artifactory/api/security/keypair/SaltProjectKey/public

@@ -745,7 +745,7 @@ install_salt_gui() {
     # Install npm dependencies
     log_substep "Installing npm dependencies..."
     cd "$INSTALL_DIR"
-    npm install --production --silent 2>/dev/null || npm install --production
+    npm install --omit=dev 2>&1 | tail -5
 
     # Set permissions
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
@@ -1056,6 +1056,32 @@ main() {
     check_systemd
     detect_os
     check_internet
+
+    # Check for previous installation and offer removal
+    if [[ -d "$INSTALL_DIR" ]] || systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        log_warn "A previous Salt-GUI installation was detected."
+        if [[ "$UNATTENDED" == "false" ]]; then
+            read -p "Remove previous installation before continuing? [y/N] " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                log_substep "Removing previous installation..."
+                systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+                systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+                rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+                systemctl daemon-reload
+                rm -rf "$INSTALL_DIR"
+                log_info "Previous installation removed"
+            fi
+        elif [[ "$FORCE_REINSTALL" == "true" ]]; then
+            log_substep "Removing previous installation (--force)..."
+            systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+            systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+            rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+            systemctl daemon-reload
+            rm -rf "$INSTALL_DIR"
+            log_info "Previous installation removed"
+        fi
+    fi
 
     # Installation steps
     update_package_cache

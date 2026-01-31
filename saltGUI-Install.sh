@@ -505,10 +505,9 @@ configure_salt_api() {
     # Create config directory if needed
     mkdir -p /etc/salt/master.d
 
-    # Check if API is already configured
-    if [[ -f "$salt_api_conf" ]] && [[ "$FORCE_REINSTALL" == "false" ]]; then
-        log_info "Salt API configuration already exists"
-        return
+    # Always overwrite API config to ensure correct port
+    if [[ -f "$salt_api_conf" ]]; then
+        log_substep "Updating existing Salt API configuration..."
     fi
 
     log_substep "Generating SSL certificates..."
@@ -839,12 +838,13 @@ EOF
 
     # Create salt.yaml if it doesn't exist
     if [[ ! -f "$config_dir/salt.yaml" ]]; then
-        log_substep "Creating salt.yaml..."
+        local machine_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+        log_substep "Creating salt.yaml (API URL: https://${machine_ip}:8001)..."
         cat > "$config_dir/salt.yaml" << EOF
 # Salt API Connection Configuration
 
 api:
-  url: "https://localhost:8001"
+  url: "https://${machine_ip}:8001"
   username: "saltadmin"
   password: "saltadmin"
   eauth: "pam"

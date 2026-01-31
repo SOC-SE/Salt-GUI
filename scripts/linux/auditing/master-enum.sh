@@ -18,7 +18,7 @@
 #   Samuel Brucker 2025-2026
 #
 
-set -euo pipefail
+set -uo pipefail
 
 
 # Ensure we are root

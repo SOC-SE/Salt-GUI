@@ -838,13 +838,12 @@ EOF
 
     # Create salt.yaml if it doesn't exist
     if [[ ! -f "$config_dir/salt.yaml" ]]; then
-        local machine_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
-        log_substep "Creating salt.yaml (API URL: https://${machine_ip}:8001)..."
+        log_substep "Creating salt.yaml (API URL: https://localhost:8001)..."
         cat > "$config_dir/salt.yaml" << EOF
 # Salt API Connection Configuration
 
 api:
-  url: "https://${machine_ip}:8001"
+  url: "https://localhost:8001"
   username: "saltadmin"
   password: "saltadmin"
   eauth: "pam"

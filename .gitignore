@@ -29,12 +29,8 @@ Thumbs.db
 coverage/
 .nyc_output/
 
-# States (user-managed, keep structure)
-states/linux/*
-states/windows/*
+# Playbooks (user-managed)
 playbooks/*.yaml
-!states/linux/.gitkeep
-!states/windows/.gitkeep
 !playbooks/.gitkeep
 
 # Uploaded files

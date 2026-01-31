@@ -784,8 +784,22 @@ install_salt_gui() {
     mkdir -p "$INSTALL_DIR"/{scripts/linux,scripts/windows,states/linux,states/windows,playbooks,logs}
 
     # Install npm dependencies
+    log_substep "Installing npm dependencies..."
     cd "$INSTALL_DIR"
-    run_with_spinner "Installing npm dependencies (this may take a moment)" npm install --omit=dev
+    npm install --omit=dev --loglevel=info 2>&1 | while IFS= read -r line; do
+        # Show package-level progress
+        if [[ "$line" == *"added"* ]] || [[ "$line" == *"npm warn"* ]] || [[ "$line" == *"packages in"* ]]; then
+            echo "      $line"
+        fi
+    done
+    local npm_exit=${PIPESTATUS[0]}
+    if [[ $npm_exit -eq 0 ]]; then
+        log_info "npm dependencies installed"
+    else
+        log_error "npm install failed (exit code $npm_exit)"
+        log_error "Trying again with verbose output..."
+        npm install --omit=dev
+    fi
 
     # Set permissions
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"

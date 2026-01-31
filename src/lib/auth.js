@@ -6,7 +6,7 @@
  * @module lib/auth
  */
 
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { getAuthConfig, saveAuthConfig } = require('./config');
 const logger = require('./logger');

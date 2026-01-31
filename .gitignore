@@ -29,16 +29,10 @@ Thumbs.db
 coverage/
 .nyc_output/
 
-# User-managed content (keep structure, ignore content)
-scripts/linux/*
-scripts/windows/*
+# States (user-managed, keep structure)
 states/linux/*
 states/windows/*
 playbooks/*.yaml
-!scripts/linux/.gitkeep
-!scripts/windows/.gitkeep
-!scripts/linux/install/
-!scripts/windows/install/
 !states/linux/.gitkeep
 !states/windows/.gitkeep
 !playbooks/.gitkeep
@@ -53,12 +47,5 @@ sessions/
 .vagrant/
 Vagrantfile
 
-# Claude Code
-.claude/
-CLAUDE.md
-ENVIRONMENT.md
-
-# Directories to ignore
-salt-gui/
+# Build artifacts
 yay/
-tests/

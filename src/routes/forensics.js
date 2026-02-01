@@ -62,7 +62,8 @@ function generateJobId() {
  * Standard forensic collection
  */
 router.post('/collect', auditAction('forensics.collect'), async (req, res) => {
-  const { targets, level = 'standard', timeout = 300 } = req.body;
+  const { targets, level = 'standard' } = req.body;
+  const timeout = req.body.timeout || (level === 'comprehensive' ? 900 : 300);
 
   if (!targets) {
     return res.status(400).json({ success: false, error: 'Targets required' });

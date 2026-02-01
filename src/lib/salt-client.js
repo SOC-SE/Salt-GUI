@@ -557,21 +557,24 @@ class SaltAPIClient {
 
     const tgt_type = Array.isArray(target) ? 'list' : 'glob';
 
-    // For bash/sh, we can use a heredoc-style approach via cmd.run
-    // For PowerShell, we encode and execute
-    let command;
+    // Use stdin to pass script content to a temp file, avoiding command-line length limits.
+    // This works for both bash and PowerShell scripts.
+    let wrapper;
     if (shell === 'powershell' || shell === 'powershell.exe') {
-      // PowerShell: encode the script as base64 and execute
-      const encoded = Buffer.from(content, 'utf16le').toString('base64');
-      command = `powershell -EncodedCommand ${encoded}`;
+      // PowerShell: read stdin, write to temp .ps1, execute, then clean up
+      const argsStr = args ? ` ${args}` : '';
+      wrapper = `powershell -Command "$f=[System.IO.Path]::GetTempPath()+'saltscript_'+[System.IO.Path]::GetRandomFileName()+'.ps1'; [System.IO.File]::WriteAllText($f,[Console]::In.ReadToEnd()); try { powershell -ExecutionPolicy Bypass -File $f${argsStr} } finally { Remove-Item $f -Force -ErrorAction SilentlyContinue }"`;
+
     } else {
-      // Bash/sh: execute script content directly
-      // Use printf to safely pass the script content
-      command = content;
+      // Bash/sh: write stdin to a temp file, then execute it
+      const argsStr = args ? ` ${args}` : '';
+      wrapper = `SCRIPT_FILE=$(mktemp /tmp/salt_script_XXXXXX.sh) && cat > "$SCRIPT_FILE" && chmod +x "$SCRIPT_FILE" && ${shell} "$SCRIPT_FILE"${argsStr} 2>&1; RC=$?; rm -f "$SCRIPT_FILE"; exit $RC`;
     }
 
     const kwarg = {
-      shell,
+      cmd: wrapper,
+      stdin: content,
+      python_shell: true,
       timeout,
       ...(runas && { runas })
     };
@@ -581,7 +584,6 @@ class SaltAPIClient {
       fun: 'cmd.run',
       tgt: target,
       tgt_type,
-      arg: [command],
       kwarg,
       timeout: (timeout + 10) * 1000
     });

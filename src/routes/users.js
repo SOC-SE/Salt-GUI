@@ -71,38 +71,74 @@ router.post('/list', async (req, res) => {
         let users = [];
 
         if (kernel === 'Windows') {
-          const cmdResult = await saltClient.run({
-            client: 'local',
-            fun: 'cmd.run_all',
-            tgt: minion,
-            arg: ['Get-LocalUser | Select-Object Name,Enabled,Description | ConvertTo-Json'],
-            kwarg: { shell: 'powershell', timeout: 30 }
-          });
+          // Fetch users and admin group membership in parallel
+          const [cmdResult, adminResult] = await Promise.all([
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: ['Get-LocalUser | Select-Object Name,Enabled,Description,SID,LastLogon | ConvertTo-Json'],
+              kwarg: { shell: 'powershell', timeout: 30 }
+            }),
+            saltClient.run({
+              client: 'local',
+              fun: 'cmd.run_all',
+              tgt: minion,
+              arg: ['Get-LocalGroupMember -Group Administrators -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | ConvertTo-Json'],
+              kwarg: { shell: 'powershell', timeout: 30 }
+            })
+          ]);
+
+          // Parse admin group members
+          const adminMembers = new Set();
+          const adminOutput = adminResult[minion];
+          if (adminOutput?.retcode === 0 && adminOutput?.stdout) {
+            try {
+              const parsed = JSON.parse(adminOutput.stdout);
+              const members = Array.isArray(parsed) ? parsed : [parsed];
+              for (const m of members) {
+                // Members come as HOSTNAME\username - extract just the username
+                const name = m.includes('\\') ? m.split('\\').pop() : m;
+                adminMembers.add(name);
+              }
+            } catch (e) { /* ignore parse errors */ }
+          }
 
           const output = cmdResult[minion];
           if (output?.retcode === 0 && output?.stdout) {
             try {
               const parsed = JSON.parse(output.stdout);
               const userList = Array.isArray(parsed) ? parsed : [parsed];
-              users = userList.map(u => ({
-                username: u.Name,
-                enabled: u.Enabled,
-                description: u.Description || '',
-                shell: 'N/A',
-                home: `C:\\Users\\${u.Name}`,
-                uid: 'N/A',
-                groups: []
-              }));
+              users = userList.map(u => {
+                const isAdmin = adminMembers.has(u.Name);
+                return {
+                  username: u.Name,
+                  enabled: u.Enabled,
+                  description: u.Description || '',
+                  sid: u.SID?.Value || u.SID || 'N/A',
+                  lastLogon: u.LastLogon ? new Date(parseInt(u.LastLogon.replace(/\/Date\((\d+)\)\//, '$1'))).toLocaleString() : 'Never',
+                  home: `C:\\Users\\${u.Name}`,
+                  uid: 'N/A',
+                  shell: 'N/A',
+                  groups: isAdmin ? ['Administrators'] : [],
+                  hasSudo: isAdmin,
+                  isSystem: false
+                };
+              });
             } catch (e) {
               const lines = output.stdout.split('\n').filter(l => l.trim());
               users = lines.slice(4).filter(l => !l.includes('---')).map(l => ({
                 username: l.trim(),
                 enabled: true,
                 description: '',
-                shell: 'N/A',
+                sid: 'N/A',
+                lastLogon: 'N/A',
                 home: '',
                 uid: 'N/A',
-                groups: []
+                shell: 'N/A',
+                groups: [],
+                hasSudo: false,
+                isSystem: false
               }));
             }
           }

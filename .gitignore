@@ -45,3 +45,8 @@ Vagrantfile
 
 # Build artifacts
 yay/
+
+# Internal docs and tests
+CLAUDE.md
+ENVIRONMENT.md
+tests/

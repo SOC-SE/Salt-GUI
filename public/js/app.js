@@ -3143,7 +3143,12 @@
           html += `</div>`;
           html += `<table class="users-table${showSystem ? ' show-system' : ''}">`;
           html += `<thead><tr>`;
-          html += `<th>Username</th><th>UID</th><th>Status</th><th>Sudo</th><th>Shell</th><th>Actions</th>`;
+          const isWindows = data.kernel === 'Windows';
+          if (isWindows) {
+            html += `<th>Username</th><th>Status</th><th>Admin</th><th>Last Logon</th><th>Actions</th>`;
+          } else {
+            html += `<th>Username</th><th>UID</th><th>Status</th><th>Sudo</th><th>Shell</th><th>Actions</th>`;
+          }
           html += `</tr></thead><tbody>`;
 
           const users = data.users || [];
@@ -3159,9 +3164,9 @@
             if (user.isSystem) rowClass.push('system-user');
             if (!user.enabled) rowClass.push('disabled-user');
 
-            output += `  ${user.username} (UID: ${user.uid})`;
+            output += isWindows ? `  ${user.username}` : `  ${user.username} (UID: ${user.uid})`;
             output += user.enabled ? '' : ' [DISABLED]';
-            output += user.hasSudo ? ' [SUDO]' : '';
+            output += user.hasSudo ? (isWindows ? ' [ADMIN]' : ' [SUDO]') : '';
             output += '\n';
 
             // Build action buttons
@@ -3182,10 +3187,16 @@
 
             html += `<tr class="${rowClass.join(' ')}" data-username="${user.username}">`;
             html += `<td><strong>${user.username}</strong></td>`;
-            html += `<td>${user.uid}</td>`;
-            html += `<td class="${user.enabled ? 'status-enabled' : 'status-disabled'}">${user.enabled ? 'Enabled' : 'Disabled'}</td>`;
-            html += `<td class="${user.hasSudo ? 'has-sudo' : 'no-sudo'}">${user.hasSudo ? 'Yes' : 'No'}</td>`;
-            html += `<td>${user.shell || 'N/A'}</td>`;
+            if (isWindows) {
+              html += `<td class="${user.enabled ? 'status-enabled' : 'status-disabled'}">${user.enabled ? 'Enabled' : 'Disabled'}</td>`;
+              html += `<td class="${user.hasSudo ? 'has-sudo' : 'no-sudo'}">${user.hasSudo ? 'Yes' : 'No'}</td>`;
+              html += `<td>${user.lastLogon || 'Never'}</td>`;
+            } else {
+              html += `<td>${user.uid}</td>`;
+              html += `<td class="${user.enabled ? 'status-enabled' : 'status-disabled'}">${user.enabled ? 'Enabled' : 'Disabled'}</td>`;
+              html += `<td class="${user.hasSudo ? 'has-sudo' : 'no-sudo'}">${user.hasSudo ? 'Yes' : 'No'}</td>`;
+              html += `<td>${user.shell || 'N/A'}</td>`;
+            }
             html += `<td class="user-actions">${actions}</td>`;
             html += `</tr>`;
           }

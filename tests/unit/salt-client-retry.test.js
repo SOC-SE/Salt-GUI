@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
 // Mock config module
 const mockConfig = {
   api: {
-    url: 'http://localhost:8000',
+    url: 'http://localhost:8001',
     username: 'testuser',
     password: 'testpass',
     eauth: 'pam',

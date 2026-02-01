@@ -3522,9 +3522,10 @@
       'tar', 'gzip', 'find', 'ss', 'netstat', 'lsof', 'ps',
       'sha256sum', 'md5sum', 'strings', 'strace', 'ltrace',
       'tcpdump', 'auditctl', 'ausearch', 'rkhunter', 'chkrootkit',
-      'debsums', 'aide', 'yara', 'vol', 'clamscan', 'freshclam'
+      'debsums', 'aide', 'yara', 'vol', 'clamscan', 'freshclam',
+      'avml', 'uac'
     ];
-    const cmd = `TOOLS="${toolsList.join(' ')}"; INSTALLED=0; MISSING=""; TOTAL=${toolsList.length}; for t in $TOOLS; do p=$(which "$t" 2>/dev/null); if [ -n "$p" ]; then printf "%-18s %-25s [INSTALLED]\\n" "$t" "$p"; INSTALLED=$((INSTALLED+1)); else printf "%-18s %-25s [NOT INSTALLED]\\n" "$t" "-"; MISSING="$MISSING $t"; fi; done; echo ""; echo "Installed: $INSTALLED/$TOTAL"; if [ -n "$MISSING" ]; then echo "Missing:$MISSING"; fi`;
+    const cmd = `TOOLS="${toolsList.join(' ')}"; INSTALLED=0; MISSING=""; TOTAL=${toolsList.length}; for t in $TOOLS; do p=$(which "$t" 2>/dev/null); if [ -n "$p" ]; then printf "%-18s %-25s [INSTALLED]\\n" "$t" "$p"; INSTALLED=$((INSTALLED+1)); elif [ "$t" = "uac" ] && [ -x /opt/uac/uac ]; then printf "%-18s %-25s [INSTALLED]\\n" "$t" "/opt/uac/uac"; INSTALLED=$((INSTALLED+1)); elif [ "$t" = "avml" ] && [ -x /opt/avml/avml ]; then printf "%-18s %-25s [INSTALLED]\\n" "$t" "/opt/avml/avml"; INSTALLED=$((INSTALLED+1)); else printf "%-18s %-25s [NOT INSTALLED]\\n" "$t" "-"; MISSING="$MISSING $t"; fi; done; echo ""; echo "Installed: $INSTALLED/$TOTAL"; if [ -n "$MISSING" ]; then echo "Missing:$MISSING"; fi`;
 
     try {
       const result = await api('/api/commands/run', {
@@ -3570,7 +3571,7 @@
     if (autoInstall) {
       outputEl.textContent = 'Installing missing forensics tools...';
       try {
-        const installCmd = 'export DEBIAN_FRONTEND=noninteractive; if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq rkhunter chkrootkit clamav clamav-daemon debsums aide yara strace ltrace tcpdump auditd lsof net-tools python3-pip 2>&1 | tail -10; elif command -v dnf >/dev/null 2>&1; then dnf install -y rkhunter clamav strace ltrace tcpdump audit lsof net-tools python3-pip 2>&1 | tail -10; elif command -v yum >/dev/null 2>&1; then yum install -y rkhunter clamav strace ltrace tcpdump audit lsof net-tools python3-pip 2>&1 | tail -10; fi; echo ""; echo "=== Installing volatility3 via pip ==="; pip3 install volatility3 2>&1 | tail -5 || pip3 install --break-system-packages volatility3 2>&1 | tail -5 || echo "volatility3 pip install failed"; echo ""; echo "=== Enabling auditd ==="; systemctl enable auditd 2>/dev/null; systemctl start auditd 2>/dev/null; echo "=== Adding audit watches ==="; auditctl -w /etc/passwd -p wa -k user_changes 2>/dev/null; auditctl -w /etc/shadow -p wa -k shadow_changes 2>/dev/null; auditctl -w /etc/sudoers -p wa -k sudoers_changes 2>/dev/null; auditctl -w /etc/ssh/sshd_config -p wa -k sshd_config 2>/dev/null; auditctl -w /etc/crontab -p wa -k crontab_changes 2>/dev/null; auditctl -w /etc/cron.d/ -p wa -k cron_d_changes 2>/dev/null; auditctl -w /etc/pam.d/ -p wa -k pam_changes 2>/dev/null; auditctl -w /etc/ld.so.preload -p wa -k ld_preload 2>/dev/null; auditctl -w /etc/profile.d/ -p wa -k profile_d 2>/dev/null; auditctl -w /etc/systemd/system/ -p wa -k systemd_changes 2>/dev/null; auditctl -w /tmp -p x -k tmp_exec 2>/dev/null; auditctl -w /dev/shm -p x -k shm_exec 2>/dev/null; echo "Install and audit setup complete"';
+        const installCmd = 'export DEBIAN_FRONTEND=noninteractive; if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq rkhunter chkrootkit clamav clamav-daemon debsums aide yara strace ltrace tcpdump auditd lsof net-tools python3-pip git 2>&1 | tail -10; elif command -v dnf >/dev/null 2>&1; then dnf install -y rkhunter clamav strace ltrace tcpdump audit lsof net-tools python3-pip git 2>&1 | tail -10; elif command -v yum >/dev/null 2>&1; then yum install -y rkhunter clamav strace ltrace tcpdump audit lsof net-tools python3-pip git 2>&1 | tail -10; fi; echo ""; echo "=== Installing volatility3 via pip ==="; pip3 install volatility3 2>&1 | tail -5 || pip3 install --break-system-packages volatility3 2>&1 | tail -5 || echo "volatility3 pip install failed"; echo ""; echo "=== Installing AVML (memory acquisition) ==="; if ! command -v avml >/dev/null 2>&1; then ARCH=$(uname -m); if [ "$ARCH" = "x86_64" ]; then wget -q https://github.com/microsoft/avml/releases/latest/download/avml -O /usr/local/bin/avml && chmod +x /usr/local/bin/avml && echo "AVML installed" || echo "AVML download failed"; else echo "AVML only supports x86_64 (current: $ARCH)"; fi; else echo "AVML already installed"; fi; echo ""; echo "=== Installing UAC (Unix-like Artifacts Collector) ==="; if [ ! -d /opt/uac ]; then git clone --depth 1 https://github.com/tclahr/uac /opt/uac 2>&1 | tail -5 && chmod +x /opt/uac/uac && echo "UAC installed to /opt/uac" || echo "UAC clone failed"; else echo "UAC already installed at /opt/uac"; fi; echo ""; echo "=== Enabling auditd ==="; systemctl enable auditd 2>/dev/null; systemctl start auditd 2>/dev/null; echo "=== Adding audit watches ==="; auditctl -w /etc/passwd -p wa -k user_changes 2>/dev/null; auditctl -w /etc/shadow -p wa -k shadow_changes 2>/dev/null; auditctl -w /etc/sudoers -p wa -k sudoers_changes 2>/dev/null; auditctl -w /etc/ssh/sshd_config -p wa -k sshd_config 2>/dev/null; auditctl -w /etc/crontab -p wa -k crontab_changes 2>/dev/null; auditctl -w /etc/cron.d/ -p wa -k cron_d_changes 2>/dev/null; auditctl -w /etc/pam.d/ -p wa -k pam_changes 2>/dev/null; auditctl -w /etc/ld.so.preload -p wa -k ld_preload 2>/dev/null; auditctl -w /etc/profile.d/ -p wa -k profile_d 2>/dev/null; auditctl -w /etc/systemd/system/ -p wa -k systemd_changes 2>/dev/null; auditctl -w /tmp -p x -k tmp_exec 2>/dev/null; auditctl -w /dev/shm -p x -k shm_exec 2>/dev/null; echo ""; echo "=== Initializing ClamAV DB ==="; freshclam --quiet 2>/dev/null || echo "freshclam update skipped"; echo "Install and audit setup complete"';
         await api('/api/commands/run', {
           method: 'POST',
           body: JSON.stringify({ targets, command: installCmd, shell: 'bash', timeout: 120 })
@@ -3661,7 +3662,33 @@
     let out = '';
     for (const [minion, output] of Object.entries(results)) {
       out += `── ${minion} ──────────────────────────────\n`;
-      out += (typeof output === 'string' ? output : JSON.stringify(output, null, 2)) + '\n\n';
+      if (output === false) {
+        out += '[ERROR] Salt returned false — the minion may be offline, the command timed out, or the Salt minion rejected the execution. Check minion connectivity with a ping.\n\n';
+      } else if (output === '' || output === null || output === undefined) {
+        out += '[WARNING] Empty response from minion.\n\n';
+      } else if (typeof output === 'string') {
+        // Look for FORENSICS_DONE marker to provide a summary
+        if (output.includes('FORENSICS_DONE:')) {
+          const lines = output.split('\n');
+          const doneLine = lines.find(l => l.includes('FORENSICS_DONE:'));
+          const path = doneLine ? doneLine.split('FORENSICS_DONE:')[1].trim() : '/tmp/forensics';
+          const completedSteps = lines.filter(l => l.includes('complete')).map(l => l.trim());
+          out += `Collection saved to: ${path}\n`;
+          if (completedSteps.length > 0) {
+            out += `Steps completed:\n${completedSteps.map(s => `  - ${s}`).join('\n')}\n`;
+          }
+          // Show any errors/warnings from the output
+          const issues = lines.filter(l => /error|fail|not installed|not found|not available/i.test(l) && !/grep|echo/i.test(l));
+          if (issues.length > 0) {
+            out += `\nWarnings/Issues:\n${issues.slice(0, 20).map(s => `  ! ${s.trim()}`).join('\n')}\n`;
+          }
+          out += '\n';
+        } else {
+          out += output + '\n\n';
+        }
+      } else {
+        out += JSON.stringify(output, null, 2) + '\n\n';
+      }
     }
     return out || 'No results';
   }
@@ -4132,6 +4159,8 @@
     const target = forensicsBrowseState.selectedMinion;
     if (!target) { showToast('Select a collection first', 'error'); return; }
     const limit = parseInt(document.getElementById('fr-timeline-limit').value) || 100;
+    // Ensure timeline section is visible
+    document.getElementById('fr-timeline-section').classList.remove('hidden');
     const listEl = document.getElementById('fr-timeline-list');
     listEl.innerHTML = '<div class="loading">Loading unified timeline (filesystem + audit)...</div>';
 
@@ -4156,7 +4185,7 @@
       }
 
       const output = result.results[target] || result.results[Object.keys(result.results)[0]] || {};
-      const text = typeof output === 'string' ? output : (output.stdout || '');
+      const text = typeof output === 'string' ? output : (output.output || output.stdout || '');
 
       const entries = [];
 
@@ -4479,6 +4508,14 @@
       document.getElementById('fr-comprehensive-opts').classList.toggle('hidden', e.target.value !== 'comprehensive');
       const descEl = document.getElementById('fr-level-desc');
       if (descEl) descEl.textContent = forensicsLevelDescs[e.target.value] || '';
+      // Auto-bump timeout for comprehensive/advanced scans
+      const timeoutEl = document.getElementById('fr-collect-timeout');
+      const currentTimeout = parseInt(timeoutEl.value) || 300;
+      if (e.target.value === 'comprehensive' && currentTimeout < 900) {
+        timeoutEl.value = 900;
+      } else if (e.target.value === 'advanced' && currentTimeout < 600) {
+        timeoutEl.value = 600;
+      }
     });
     document.getElementById('fr-collect-target-type').addEventListener('change', (e) => {
       document.getElementById('fr-collect-single-target').classList.toggle('hidden', e.target.value !== 'single');

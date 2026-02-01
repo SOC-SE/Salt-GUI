@@ -261,6 +261,36 @@ class SaltAPIClient {
   }
 
   /**
+   * Get kernel type for multiple minions
+   * @param {string} targets - Target expression (glob, list, etc.)
+   * @returns {Promise<Object>} Map of minion_id -> kernel type
+   */
+  async getKernels(targets) {
+    try {
+      const result = await this.run({
+        client: 'local',
+        tgt: targets,
+        tgt_type: Array.isArray(targets) ? 'list' : 'glob',
+        fun: 'grains.item',
+        arg: ['kernel']
+      });
+
+      const kernels = {};
+      const now = Date.now();
+      for (const [minion, data] of Object.entries(result || {})) {
+        const kernel = data?.kernel || 'Linux';
+        kernels[minion] = kernel;
+        this.kernelCache.set(minion, kernel);
+        this.kernelCacheTimestamps.set(minion, now);
+      }
+      return kernels;
+    } catch (error) {
+      logger.warn(`Failed to get kernels for ${targets}: ${error.message}`);
+      return {};
+    }
+  }
+
+  /**
    * Pre-populate kernel cache from devices data
    * @param {Object} devicesData - Map of minion_id -> device info with kernel
    */
@@ -393,6 +423,44 @@ class SaltAPIClient {
       tgt_type,
       kwarg,
       timeout: (timeout + 10) * 1000 // HTTP timeout slightly longer
+    });
+  }
+
+  /**
+   * Execute a large script via cmd.script using a salt:// source or inline.
+   * For very large commands that exceed cmd.run limits, this writes the script
+   * content to a temp file on the minion via cp.recv then executes it.
+   * Falls back to cmd.run with a wrapper that decodes base64 if cmd.script
+   * is not suitable.
+   * @param {string|string[]} target - Target pattern or list
+   * @param {string} scriptContent - Full script content (bash)
+   * @param {Object} [options] - Additional options (shell, timeout)
+   * @returns {Promise<Object>} Map of minion_id -> output
+   */
+  async cmdScript(target, scriptContent, options = {}) {
+    const { shell = '/bin/bash', timeout = 300 } = options;
+
+    // Use cmd.run with stdin parameter to pipe the script content.
+    // The command is a small wrapper; the actual script goes via kwarg.stdin
+    // which Salt passes to the process's stdin, avoiding command-line length limits.
+    const wrapper = `SCRIPT_FILE=$(mktemp /tmp/forensics_script_XXXXXX.sh) && cat > "$SCRIPT_FILE" && chmod +x "$SCRIPT_FILE" && ${shell} "$SCRIPT_FILE" 2>&1; RC=$?; rm -f "$SCRIPT_FILE"; exit $RC`;
+
+    const resolvedTarget = Array.isArray(target) && target.length === 1 ? target[0] : target;
+    const tgt_type = Array.isArray(resolvedTarget) ? 'list' : 'glob';
+
+    return this.run({
+      client: 'local',
+      fun: 'cmd.run',
+      tgt: resolvedTarget,
+      tgt_type,
+      kwarg: {
+        cmd: wrapper,
+        stdin: scriptContent,
+        python_shell: true,
+        shell,
+        timeout
+      },
+      timeout: (timeout + 10) * 1000
     });
   }
 

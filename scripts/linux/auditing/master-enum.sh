@@ -286,9 +286,9 @@ get_cron() {
     local FLAGS_WIDTH=25
 
     # Arrays to store cron jobs by category
-    declare -a suspicious_jobs
-    declare -a system_jobs
-    declare -a user_jobs
+    declare -a suspicious_jobs=()
+    declare -a system_jobs=()
+    declare -a user_jobs=()
 
     is_high_frequency() {
         local schedule="$1"
@@ -623,12 +623,12 @@ get_users(){
     local FLAG_DETAIL_REASON_WIDTH=50
 
     # Arrays to store users by category
-    declare -a high_risk_users
-    declare -a privileged_users  
-    declare -a standard_users
+    declare -a high_risk_users=()
+    declare -a privileged_users=()
+    declare -a standard_users=()
 
     # Array to store flag details
-    declare -a flag_details
+    declare -a flag_details=()
 
 
     check_system() {
@@ -916,9 +916,9 @@ get_sudoers(){
     local FLAGS_WIDTH=40
 
     # Arrays to store sudoers entries by category
-    declare -a high_risk_rules
-    declare -a group_privileges
-    declare -a user_privileges
+    declare -a high_risk_rules=()
+    declare -a group_privileges=()
+    declare -a user_privileges=()
 
     # Check if command list contains dangerous commands (based on GTFOBins Sudo category)
     # Source: https://gtfobins.github.io/
@@ -1287,9 +1287,9 @@ get_sudoers(){
 get_services(){
 
     # Arrays to store services by category
-    declare -a active_services
-    declare -a inactive_services
-    declare -a malformed_services
+    declare -a active_services=()
+    declare -a inactive_services=()
+    declare -a malformed_services=()
 
     # --- SYSTEMD DETECTION ---
     if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
@@ -1891,9 +1891,9 @@ get_privesc(){
     local FLAGS_WIDTH=30
 
     # Arrays to store findings by category
-    declare -a dangerous_suid
-    declare -a standard_suid
-    declare -a capabilities_binaries
+    declare -a dangerous_suid=()
+    declare -a standard_suid=()
+    declare -a capabilities_binaries=()
 
 
     # Check if binary is in a standard location

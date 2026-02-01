@@ -509,31 +509,132 @@ router.get('/findings/:target', async (req, res) => {
 router.get('/timeline/:target', async (req, res) => {
   const { target } = req.params;
   const { collection, limit = 200 } = req.query;
+  const maxEntries = parseInt(limit) || 200;
 
   try {
-    const script = `find /tmp/forensics/ /var/log/ /etc/ -maxdepth 2 -type f -printf '%T@ %m %u %s %p\\n' 2>/dev/null | sort -rn | head -${parseInt(limit)}`;
-    const result = await saltClient.cmd(target, script, { shell: '/bin/bash', timeout: 60 });
+    // Try to read pre-collected tarball data first
+    let useLocal = false;
+    let timelineText = '', lsattrText = '', auditText = '';
 
-    const timeline = {};
-    for (const [minion, output] of Object.entries(result)) {
-      if (typeof output === 'string') {
-        timeline[minion] = output.split('\n').filter(l => l.trim()).map(line => {
-          const parts = line.split(' ');
-          const mtime = parseFloat(parts[0]) || 0;
-          return {
-            mtime: new Date(mtime * 1000).toISOString(),
-            mode: parts[1] || '',
-            uid: parts[2] || '',
-            size: parseInt(parts[3]) || 0,
-            path: parts.slice(4).join(' ')
-          };
-        });
-      } else {
-        timeline[minion] = [];
+    if (collection) {
+      const localPath = getLocalArtifactPath(target, collection);
+      if (localPath) {
+        try {
+          const r1 = await execLocal('tar', ['xzf', localPath, '-O', './files/file_timeline.txt']);
+          timelineText = r1.stdout || '';
+          useLocal = true;
+        } catch {}
+        if (useLocal) {
+          try {
+            const r2 = await execLocal('tar', ['xzf', localPath, '-O', './files/lsattr.txt']);
+            lsattrText = r2.stdout || '';
+          } catch {}
+          try {
+            const r3 = await execLocal('tar', ['xzf', localPath, '-O', './files/audit_editors.txt']);
+            auditText = r3.stdout || '';
+          } catch {}
+        }
+      }
+      if (!useLocal) {
+        // Try via Salt
+        const esc = collection.replace(/'/g, "\\'");
+        try {
+          const r = await saltClient.cmd(target, `tar xzf '${esc}' -O './files/file_timeline.txt' 2>/dev/null`, { shell: '/bin/bash', timeout: 60 });
+          const out = r[target] || r[Object.keys(r)[0]] || '';
+          if (typeof out === 'string' && out.trim()) {
+            timelineText = out;
+            useLocal = true;
+            try {
+              const r2 = await saltClient.cmd(target, `tar xzf '${esc}' -O './files/lsattr.txt' 2>/dev/null`, { shell: '/bin/bash', timeout: 30 });
+              lsattrText = typeof (r2[target] || r2[Object.keys(r2)[0]]) === 'string' ? (r2[target] || r2[Object.keys(r2)[0]]) : '';
+            } catch {}
+            try {
+              const r3 = await saltClient.cmd(target, `tar xzf '${esc}' -O './files/audit_editors.txt' 2>/dev/null`, { shell: '/bin/bash', timeout: 30 });
+              auditText = typeof (r3[target] || r3[Object.keys(r3)[0]]) === 'string' ? (r3[target] || r3[Object.keys(r3)[0]]) : '';
+            } catch {}
+          }
+        } catch {}
       }
     }
 
-    res.json({ success: true, timeline });
+    if (useLocal && timelineText.trim()) {
+      // Build lsattr map: path -> flags
+      const flagsMap = {};
+      for (const line of lsattrText.split('\n')) {
+        const m = line.match(/^(\S+)\s+(.+)$/);
+        if (m) flagsMap[m[2]] = m[1];
+      }
+
+      // Build audit editor map: path -> last editor info
+      const editorMap = {};
+      for (const line of auditText.split('\n')) {
+        if (!line.trim()) continue;
+        // PATH line contains name=, SYSCALL contains uid/auid
+        const nameMatch = line.match(/name=(\S+)/);
+        const uidMatch = line.match(/auid=(\S+)/);
+        const commMatch = line.match(/comm=(\S+)/);
+        if (nameMatch) {
+          const p = nameMatch[1].replace(/"/g, '');
+          const editor = uidMatch ? uidMatch[1].replace(/"/g, '') : '';
+          const comm = commMatch ? commMatch[1].replace(/"/g, '') : '';
+          editorMap[p] = editor + (comm ? ' via ' + comm : '');
+        }
+      }
+
+      // Parse file_timeline.txt: epoch\tperms\tsize\tuser\tgroup\tpath
+      const entries = [];
+      for (const line of timelineText.split('\n')) {
+        if (!line.trim()) continue;
+        const cols = line.split('\t');
+        if (cols.length < 6) continue;
+        const epoch = parseFloat(cols[0]) || 0;
+        const p = cols[5];
+        const rawFlags = flagsMap[p] || '';
+        // Translate lsattr flags to readable labels
+        let flags = '';
+        if (rawFlags.includes('i')) flags += 'immutable ';
+        if (rawFlags.includes('a')) flags += 'append-only ';
+        if (rawFlags.includes('s')) flags += 'secure-delete ';
+        flags = flags.trim();
+
+        entries.push({
+          path: p,
+          time: new Date(epoch * 1000).toISOString(),
+          perms: cols[1] || '',
+          size: parseInt(cols[2]) || 0,
+          owner: (cols[3] || '') + ':' + (cols[4] || ''),
+          flags,
+          editor: editorMap[p] || ''
+        });
+      }
+
+      res.json({ success: true, entries: entries.slice(0, maxEntries), source: 'tarball' });
+    } else {
+      // Fallback: live find command
+      const script = `find /tmp/forensics/ /var/log/ /etc/ -maxdepth 2 -type f -printf '%T@ %m %u %s %p\\n' 2>/dev/null | sort -rn | head -${maxEntries}`;
+      const result = await saltClient.cmd(target, script, { shell: '/bin/bash', timeout: 60 });
+
+      const entries = [];
+      for (const [minion, output] of Object.entries(result)) {
+        if (typeof output === 'string') {
+          for (const line of output.split('\n').filter(l => l.trim())) {
+            const parts = line.split(' ');
+            const mtime = parseFloat(parts[0]) || 0;
+            entries.push({
+              path: parts.slice(4).join(' '),
+              time: new Date(mtime * 1000).toISOString(),
+              perms: parts[1] || '',
+              size: parseInt(parts[3]) || 0,
+              owner: (parts[2] || '') + ':',
+              flags: '',
+              editor: ''
+            });
+          }
+        }
+      }
+
+      res.json({ success: true, entries, source: 'live' });
+    }
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -884,6 +985,9 @@ timeout 30 bash -c 'getcap -r /usr /bin /sbin /opt 2>/dev/null' > "$FDIR/files/c
 timeout 15 bash -c '[ -f /.dockerenv ] && echo "FOUND: /.dockerenv"; grep -q docker /proc/1/cgroup 2>/dev/null && echo "FOUND: docker cgroup"; grep -q lxc /proc/1/cgroup 2>/dev/null && echo "FOUND: lxc cgroup"; cat /proc/1/cgroup 2>/dev/null; echo ""; cat /proc/1/status 2>/dev/null | grep -i cap' > "$FDIR/files/container_indicators.txt"
 timeout 10 bash -c 'docker ps -a 2>/dev/null; echo ""; docker images 2>/dev/null; echo ""; podman ps -a 2>/dev/null; podman images 2>/dev/null' > "$FDIR/files/docker_podman.txt"
 timeout 60 bash -c 'find /var/www /srv/www /opt -type f \\( -name "*.php" -o -name "*.jsp" -o -name "*.asp" -o -name "*.aspx" \\) -exec grep -lE "(eval|exec|system|passthru|shell_exec|popen|proc_open|base64_decode|assert)" {} \\; 2>/dev/null' > "$FDIR/files/webshell_scan.txt"
+timeout 120 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | sort -rn | head -5000' > "$FDIR/files/file_timeline.txt"
+timeout 30 bash -c 'lsattr -R /etc /usr/bin /usr/sbin /home 2>/dev/null' > "$FDIR/files/lsattr.txt"
+timeout 30 bash -c 'ausearch -ts recent -i 2>/dev/null | awk "/^type=PATH/{ path=\\$0 } /^type=SYSCALL/{ if(path) print path \\"\\t\\" \\$0; path=\\"\\" }" 2>/dev/null' > "$FDIR/files/audit_editors.txt"
 
 # =============================================
 # LOGS

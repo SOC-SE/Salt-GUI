@@ -3007,7 +3007,7 @@ label {
 
 .forensics-timeline-item {
   display: grid;
-  grid-template-columns: 160px 60px 60px 50px 60px 1fr;
+  grid-template-columns: 150px 1fr 90px 60px 90px 80px 120px;
   gap: var(--spacing-sm);
   padding: var(--spacing-xs) var(--spacing-md);
   border-bottom: 1px solid var(--border-color);
@@ -3029,7 +3029,7 @@ label {
 
 .forensics-timeline-header {
   display: grid;
-  grid-template-columns: 160px 60px 60px 50px 60px 1fr;
+  grid-template-columns: 150px 1fr 90px 60px 90px 80px 120px;
   gap: var(--spacing-sm);
   padding: var(--spacing-xs) var(--spacing-md);
   background: var(--bg-tertiary);

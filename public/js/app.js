@@ -3920,9 +3920,17 @@
   }
 
   function renderTreeNode(node, depth = 0) {
+    const DIR_PRIORITY = {
+      persistence: 1, users: 2, processes: 3, network: 4,
+      files: 5, system: 6, scanning: 7, logs: 8, memory: 9
+    };
     let html = '';
-    // Sort directories first, then files
-    const dirs = Object.values(node.children).sort((a, b) => a.name.localeCompare(b.name));
+    // Sort directories by IR priority (then alpha), then files
+    const dirs = Object.values(node.children).sort((a, b) => {
+      const pa = DIR_PRIORITY[a.name] || 100;
+      const pb = DIR_PRIORITY[b.name] || 100;
+      return pa !== pb ? pa - pb : a.name.localeCompare(b.name);
+    });
     const files = (node.files || []).sort((a, b) => a.name.localeCompare(b.name));
 
     for (const dir of dirs) {
@@ -4159,92 +4167,36 @@
     const target = forensicsBrowseState.selectedMinion;
     if (!target) { showToast('Select a collection first', 'error'); return; }
     const limit = parseInt(document.getElementById('fr-timeline-limit').value) || 100;
-    // Ensure timeline section is visible
     document.getElementById('fr-timeline-section').classList.remove('hidden');
     const listEl = document.getElementById('fr-timeline-list');
-    listEl.innerHTML = '<div class="loading">Loading unified timeline (filesystem + audit)...</div>';
+    listEl.innerHTML = '<div class="loading">Loading timeline...</div>';
 
     try {
-      // Run both filesystem find and ausearch in a single command
-      const halfLimit = Math.ceil(limit / 2);
-      const cmd = [
-        `echo '===FS_START==='`,
-        `find /tmp/forensics/ /var/log/ /etc/ -maxdepth 2 -type f -printf '%T@ %m %u %s %p\\n' 2>/dev/null | sort -rn | head -${halfLimit}`,
-        `echo '===AUDIT_START==='`,
-        `ausearch -ts recent -i 2>/dev/null | head -${halfLimit} || echo ''`
-      ].join('; ');
+      const artifact = forensicsBrowseState.selectedArtifact || '';
+      const result = await api(`/api/forensics/timeline/${encodeURIComponent(target)}?limit=${limit}&collection=${encodeURIComponent(artifact)}`);
 
-      const result = await api('/api/commands/run', {
-        method: 'POST',
-        body: JSON.stringify({ targets: [target], command: cmd, shell: 'bash', timeout: 60 })
-      });
-
-      if (!result.success || !result.results) {
-        listEl.innerHTML = '<div class="loading">No data returned</div>';
-        return;
-      }
-
-      const output = result.results[target] || result.results[Object.keys(result.results)[0]] || {};
-      const text = typeof output === 'string' ? output : (output.output || output.stdout || '');
-
-      const entries = [];
-
-      // Parse filesystem entries
-      const fsPart = text.split('===AUDIT_START===')[0].split('===FS_START===')[1] || '';
-      for (const line of fsPart.split('\n').filter(l => l.trim())) {
-        const parts = line.match(/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/);
-        if (parts) {
-          entries.push({
-            timestamp: parseFloat(parts[1]) * 1000,
-            source: 'FS',
-            mode: parts[2],
-            uid: parts[3],
-            size: parts[4],
-            path: parts[5]
-          });
-        }
-      }
-
-      // Parse audit entries
-      const auditPart = text.split('===AUDIT_START===')[1] || '';
-      for (const line of auditPart.split('\n').filter(l => l.trim())) {
-        // Try to extract timestamp from audit line (e.g. "type=SYSCALL msg=audit(01/30/2026 14:30:00.123:456)" or epoch)
-        let ts = Date.now();
-        const tsMatch = line.match(/msg=audit\(([^)]+)\)/);
-        if (tsMatch) {
-          const parsed = Date.parse(tsMatch[1].split(':')[0]);
-          if (!isNaN(parsed)) ts = parsed;
-        }
-        entries.push({
-          timestamp: ts,
-          source: 'AUDIT',
-          mode: '',
-          uid: '',
-          size: '',
-          path: line.length > 120 ? line.substring(0, 120) + '...' : line
-        });
-      }
-
-      // Sort by timestamp descending
-      entries.sort((a, b) => b.timestamp - a.timestamp);
-
-      if (entries.length === 0) {
+      if (!result.success || !result.entries || result.entries.length === 0) {
         listEl.innerHTML = '<div class="loading">No timeline data</div>';
         return;
       }
 
-      listEl.innerHTML = `<div class="forensics-timeline-header"><span>Time</span><span>Source</span><span>Mode</span><span>Owner</span><span>Size</span><span>Path</span></div>` +
-        entries.slice(0, limit).map(e => {
-          const mtime = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
-          const srcClass = e.source === 'AUDIT' ? 'style="color:var(--status-warning);"' : '';
+      const entries = result.entries;
+
+      listEl.innerHTML = `<div class="forensics-timeline-header"><span>Time</span><span>Path</span><span>Perms</span><span>Size</span><span>Owner</span><span>Flags</span><span>Last Editor</span></div>` +
+        entries.map(e => {
+          const time = e.time ? new Date(e.time).toLocaleString() : '';
+          const flagsStyle = e.flags ? 'style="color:var(--status-warning);"' : '';
+          // Highlight if non-root edited /etc files
+          const editorStyle = (e.editor && !e.editor.startsWith('root') && !e.editor.startsWith('uid=0') && e.path && e.path.startsWith('/etc/')) ? 'style="color:var(--status-error);"' : '';
           return `
           <div class="forensics-timeline-item">
-            <span>${escapeHtml(mtime)}</span>
-            <span ${srcClass}>${escapeHtml(e.source)}</span>
-            <span>${escapeHtml(String(e.mode || ''))}</span>
-            <span>${escapeHtml(String(e.uid || ''))}</span>
-            <span>${e.size ? formatBytes(parseInt(e.size) || 0) : ''}</span>
+            <span>${escapeHtml(time)}</span>
             <span>${escapeHtml(e.path || '')}</span>
+            <span>${escapeHtml(e.perms || '')}</span>
+            <span>${e.size ? formatBytes(e.size) : ''}</span>
+            <span>${escapeHtml(e.owner || '')}</span>
+            <span ${flagsStyle}>${escapeHtml(e.flags || '')}</span>
+            <span ${editorStyle}>${escapeHtml(e.editor || '')}</span>
           </div>`;
         }).join('');
     } catch (error) {

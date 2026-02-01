@@ -2192,6 +2192,11 @@ label {
   color: var(--text-secondary);
 }
 
+.users-minion-header .dc-badge {
+  background: var(--status-info);
+  color: #fff;
+}
+
 .users-table {
   width: 100%;
   border-collapse: collapse;

@@ -71,75 +71,140 @@ router.post('/list', async (req, res) => {
         let users = [];
 
         if (kernel === 'Windows') {
-          // Fetch users and admin group membership in parallel
-          const [cmdResult, adminResult] = await Promise.all([
-            saltClient.run({
-              client: 'local',
-              fun: 'cmd.run_all',
-              tgt: minion,
-              arg: ['Get-LocalUser | Select-Object Name,Enabled,Description,SID,LastLogon | ConvertTo-Json'],
-              kwarg: { shell: 'powershell', timeout: 30 }
-            }),
-            saltClient.run({
-              client: 'local',
-              fun: 'cmd.run_all',
-              tgt: minion,
-              arg: ['Get-LocalGroupMember -Group Administrators -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | ConvertTo-Json'],
-              kwarg: { shell: 'powershell', timeout: 30 }
-            })
-          ]);
+          // Detect if this is a Domain Controller
+          const isDC = await saltClient.isDomainController(minion);
+
+          let cmdResult, adminResult;
+
+          if (isDC) {
+            // DC: use 'net user' (operates against AD) and 'net group "Domain Admins"'
+            [cmdResult, adminResult] = await Promise.all([
+              saltClient.run({
+                client: 'local',
+                fun: 'cmd.run_all',
+                tgt: minion,
+                arg: ['net user'],
+                kwarg: { shell: 'cmd', timeout: 30 }
+              }),
+              saltClient.run({
+                client: 'local',
+                fun: 'cmd.run_all',
+                tgt: minion,
+                arg: ['net group "Domain Admins"'],
+                kwarg: { shell: 'cmd', timeout: 30 }
+              })
+            ]);
+          } else {
+            // Non-DC: use PowerShell Get-LocalUser and Get-LocalGroupMember
+            [cmdResult, adminResult] = await Promise.all([
+              saltClient.run({
+                client: 'local',
+                fun: 'cmd.run_all',
+                tgt: minion,
+                arg: ['Get-LocalUser | Select-Object Name,Enabled,Description,SID,LastLogon | ConvertTo-Json'],
+                kwarg: { shell: 'powershell', timeout: 30 }
+              }),
+              saltClient.run({
+                client: 'local',
+                fun: 'cmd.run_all',
+                tgt: minion,
+                arg: ['Get-LocalGroupMember -Group Administrators -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | ConvertTo-Json'],
+                kwarg: { shell: 'powershell', timeout: 30 }
+              })
+            ]);
+          }
 
           // Parse admin group members
           const adminMembers = new Set();
           const adminOutput = adminResult[minion];
           if (adminOutput?.retcode === 0 && adminOutput?.stdout) {
-            try {
-              const parsed = JSON.parse(adminOutput.stdout);
-              const members = Array.isArray(parsed) ? parsed : [parsed];
-              for (const m of members) {
-                // Members come as HOSTNAME\username - extract just the username
-                const name = m.includes('\\') ? m.split('\\').pop() : m;
-                adminMembers.add(name);
+            if (isDC) {
+              // Parse 'net group "Domain Admins"' output
+              // Format: header lines, then "---------------", then usernames in columns, then "The command completed successfully."
+              const lines = adminOutput.stdout.split('\n').map(l => l.trim());
+              let pastSeparator = false;
+              for (const line of lines) {
+                if (line.startsWith('---')) { pastSeparator = true; continue; }
+                if (!pastSeparator || !line || line.startsWith('The command completed')) continue;
+                // Usernames may be listed multiple per line separated by spaces
+                line.split(/\s+/).filter(n => n).forEach(n => adminMembers.add(n));
               }
-            } catch (e) { /* ignore parse errors */ }
+            } else {
+              try {
+                const parsed = JSON.parse(adminOutput.stdout);
+                const members = Array.isArray(parsed) ? parsed : [parsed];
+                for (const m of members) {
+                  const name = m.includes('\\') ? m.split('\\').pop() : m;
+                  adminMembers.add(name);
+                }
+              } catch (e) { /* ignore parse errors */ }
+            }
           }
 
           const output = cmdResult[minion];
           if (output?.retcode === 0 && output?.stdout) {
-            try {
-              const parsed = JSON.parse(output.stdout);
-              const userList = Array.isArray(parsed) ? parsed : [parsed];
-              users = userList.map(u => {
-                const isAdmin = adminMembers.has(u.Name);
-                return {
-                  username: u.Name,
-                  enabled: u.Enabled,
-                  description: u.Description || '',
-                  sid: u.SID?.Value || u.SID || 'N/A',
-                  lastLogon: u.LastLogon ? new Date(parseInt(u.LastLogon.replace(/\/Date\((\d+)\)\//, '$1'))).toLocaleString() : 'Never',
-                  home: `C:\\Users\\${u.Name}`,
+            if (isDC) {
+              // Parse 'net user' output - usernames listed in columns after separator
+              const lines = output.stdout.split('\n').map(l => l.trim());
+              let pastSeparator = false;
+              for (const line of lines) {
+                if (line.startsWith('---')) { pastSeparator = true; continue; }
+                if (!pastSeparator || !line || line.startsWith('The command completed')) continue;
+                const names = line.split(/\s{2,}/).filter(n => n);
+                for (const name of names) {
+                  const isAdmin = adminMembers.has(name);
+                  users.push({
+                    username: name,
+                    enabled: true,
+                    description: '',
+                    sid: 'N/A',
+                    lastLogon: 'N/A',
+                    home: '',
+                    uid: 'N/A',
+                    shell: 'N/A',
+                    groups: isAdmin ? ['Domain Admins'] : [],
+                    hasSudo: isAdmin,
+                    isSystem: false,
+                    isDC: true
+                  });
+                }
+              }
+            } else {
+              try {
+                const parsed = JSON.parse(output.stdout);
+                const userList = Array.isArray(parsed) ? parsed : [parsed];
+                users = userList.map(u => {
+                  const isAdmin = adminMembers.has(u.Name);
+                  return {
+                    username: u.Name,
+                    enabled: u.Enabled,
+                    description: u.Description || '',
+                    sid: u.SID?.Value || u.SID || 'N/A',
+                    lastLogon: u.LastLogon ? new Date(parseInt(u.LastLogon.replace(/\/Date\((\d+)\)\//, '$1'))).toLocaleString() : 'Never',
+                    home: `C:\\Users\\${u.Name}`,
+                    uid: 'N/A',
+                    shell: 'N/A',
+                    groups: isAdmin ? ['Administrators'] : [],
+                    hasSudo: isAdmin,
+                    isSystem: false
+                  };
+                });
+              } catch (e) {
+                const lines = output.stdout.split('\n').filter(l => l.trim());
+                users = lines.slice(4).filter(l => !l.includes('---')).map(l => ({
+                  username: l.trim(),
+                  enabled: true,
+                  description: '',
+                  sid: 'N/A',
+                  lastLogon: 'N/A',
+                  home: '',
                   uid: 'N/A',
                   shell: 'N/A',
-                  groups: isAdmin ? ['Administrators'] : [],
-                  hasSudo: isAdmin,
+                  groups: [],
+                  hasSudo: false,
                   isSystem: false
-                };
-              });
-            } catch (e) {
-              const lines = output.stdout.split('\n').filter(l => l.trim());
-              users = lines.slice(4).filter(l => !l.includes('---')).map(l => ({
-                username: l.trim(),
-                enabled: true,
-                description: '',
-                sid: 'N/A',
-                lastLogon: 'N/A',
-                home: '',
-                uid: 'N/A',
-                shell: 'N/A',
-                groups: [],
-                hasSudo: false,
-                isSystem: false
-              }));
+                }));
+              }
             }
           }
         } else {
@@ -234,9 +299,11 @@ router.post('/list', async (req, res) => {
           }
         }
 
+        const isDC = kernel === 'Windows' && users.length > 0 && users[0]?.isDC;
         results[minion] = {
           success: true,
           kernel,
+          isDC: isDC || false,
           users
         };
       } catch (err) {
@@ -328,6 +395,7 @@ router.post('/create', async (req, res) => {
         let cmdResult;
 
         if (kernel === 'Windows') {
+          const isDC = await saltClient.isDomainController(minion);
           const escapedPassword = password.replace(/"/g, '`"');
           const command = `net user "${username}" "${escapedPassword}" /add`;
 
@@ -340,11 +408,12 @@ router.post('/create', async (req, res) => {
           });
 
           if (sudo && cmdResult[minion]?.retcode === 0) {
+            const adminGroup = isDC ? 'net group "Domain Admins"' : 'net localgroup Administrators';
             await saltClient.run({
               client: 'local',
               fun: 'cmd.run_all',
               tgt: minion,
-              arg: [`net localgroup Administrators "${username}" /add`],
+              arg: [`${adminGroup} "${username}" /add`],
               kwarg: { shell: 'cmd', timeout: 30 }
             });
           }
@@ -734,8 +803,10 @@ router.post('/sudo', async (req, res) => {
         let cmdResult;
 
         if (kernel === 'Windows') {
+          const isDC = await saltClient.isDomainController(minion);
           const action = grant ? '/add' : '/delete';
-          const command = `net localgroup Administrators "${username}" ${action}`;
+          const adminGroup = isDC ? 'net group "Domain Admins"' : 'net localgroup Administrators';
+          const command = `${adminGroup} "${username}" ${action}`;
           cmdResult = await saltClient.run({
             client: 'local',
             fun: 'cmd.run_all',

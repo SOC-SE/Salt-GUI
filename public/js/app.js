@@ -3140,12 +3140,14 @@
           html += `<div class="users-minion-header">`;
           html += `<span>${minion}</span>`;
           html += `<span class="kernel-badge">${data.kernel}</span>`;
+          if (data.isDC) html += `<span class="kernel-badge dc-badge">DC</span>`;
           html += `</div>`;
           html += `<table class="users-table${showSystem ? ' show-system' : ''}">`;
           html += `<thead><tr>`;
           const isWindows = data.kernel === 'Windows';
+          const isDC = data.isDC || false;
           if (isWindows) {
-            html += `<th>Username</th><th>Status</th><th>Admin</th><th>Last Logon</th><th>Actions</th>`;
+            html += `<th>Username</th><th>Status</th><th>${isDC ? 'Domain Admin' : 'Admin'}</th><th>Last Logon</th><th>Actions</th>`;
           } else {
             html += `<th>Username</th><th>UID</th><th>Status</th><th>Sudo</th><th>Shell</th><th>Actions</th>`;
           }
@@ -3166,11 +3168,12 @@
 
             output += isWindows ? `  ${user.username}` : `  ${user.username} (UID: ${user.uid})`;
             output += user.enabled ? '' : ' [DISABLED]';
-            output += user.hasSudo ? (isWindows ? ' [ADMIN]' : ' [SUDO]') : '';
+            output += user.hasSudo ? (isDC ? ' [DOMAIN ADMIN]' : isWindows ? ' [ADMIN]' : ' [SUDO]') : '';
             output += '\n';
 
             // Build action buttons
             let actions = '';
+            const sudoLabel = isDC ? 'Domain Admin' : isWindows ? 'Admin' : 'Sudo';
             if (!user.isSystem || user.username === 'root') {
               if (user.enabled) {
                 actions += `<button class="btn btn-action-disable" onclick="userAction('disable', '${minion}', '${user.username}')">Disable</button>`;
@@ -3178,9 +3181,9 @@
                 actions += `<button class="btn btn-action-enable" onclick="userAction('enable', '${minion}', '${user.username}')">Enable</button>`;
               }
               if (user.hasSudo) {
-                actions += `<button class="btn btn-action-sudo" onclick="userAction('revoke-sudo', '${minion}', '${user.username}')">-Sudo</button>`;
+                actions += `<button class="btn btn-action-sudo" onclick="userAction('revoke-sudo', '${minion}', '${user.username}')">-${sudoLabel}</button>`;
               } else {
-                actions += `<button class="btn btn-action-sudo" onclick="userAction('grant-sudo', '${minion}', '${user.username}')">+Sudo</button>`;
+                actions += `<button class="btn btn-action-sudo" onclick="userAction('grant-sudo', '${minion}', '${user.username}')">+${sudoLabel}</button>`;
               }
               actions += `<button class="btn btn-action-password" onclick="userAction('password', '${minion}', '${user.username}')">Password</button>`;
             }

@@ -31,6 +31,9 @@ class SaltAPIClient {
     this.kernelCache = new Map();
     this.kernelCacheTimeout = 5 * 60 * 1000; // 5 minutes
     this.kernelCacheTimestamps = new Map();
+    // Cache for domain controller detection (minion_id -> boolean)
+    this.dcCache = new Map();
+    this.dcCacheTimestamps = new Map();
     this.reload(options);
   }
 
@@ -301,6 +304,55 @@ class SaltAPIClient {
         this.kernelCache.set(minionId, data.kernel);
         this.kernelCacheTimestamps.set(minionId, now);
       }
+    }
+  }
+
+  /**
+   * Check if a Windows minion is a Domain Controller (with caching)
+   * ProductType 2 = Domain Controller
+   * @param {string} target - Minion ID
+   * @returns {Promise<boolean>} True if DC
+   */
+  async isDomainController(target) {
+    const now = Date.now();
+    const cacheTimestamp = this.dcCacheTimestamps.get(target) || 0;
+
+    if (this.dcCache.has(target) && (now - cacheTimestamp) < this.kernelCacheTimeout) {
+      return this.dcCache.get(target);
+    }
+
+    try {
+      const result = await this.run({
+        client: 'local',
+        fun: 'cmd.run',
+        tgt: target,
+        kwarg: {
+          cmd: '(Get-WmiObject Win32_OperatingSystem).ProductType',
+          shell: 'powershell',
+          timeout: 15
+        }
+      });
+
+      const productType = parseInt(result[target], 10);
+      const isDC = productType === 2;
+      this.dcCache.set(target, isDC);
+      this.dcCacheTimestamps.set(target, now);
+      return isDC;
+    } catch (error) {
+      logger.warn(`Failed to detect DC status for ${target}, assuming non-DC`);
+      return false;
+    }
+  }
+
+  /**
+   * Pre-populate DC cache from external data
+   * @param {Object} data - Map of minion_id -> boolean (isDC)
+   */
+  populateDCCache(data) {
+    const now = Date.now();
+    for (const [minionId, isDC] of Object.entries(data)) {
+      this.dcCache.set(minionId, isDC);
+      this.dcCacheTimestamps.set(minionId, now);
     }
   }
 

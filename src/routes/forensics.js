@@ -585,7 +585,7 @@ router.get('/timeline/:target', async (req, res) => {
       // Parse file_timeline.txt: epoch\tperms\tsize\tuser\tgroup\tpath
       const entries = [];
       for (const line of timelineText.split('\n')) {
-        if (!line.trim()) continue;
+        if (!line.trim() || line.startsWith('#')) continue;
         const cols = line.split('\t');
         if (cols.length < 6) continue;
         const epoch = parseFloat(cols[0]) || 0;
@@ -609,7 +609,7 @@ router.get('/timeline/:target', async (req, res) => {
         });
       }
 
-      res.json({ success: true, entries: entries.slice(0, maxEntries), source: 'tarball' });
+      res.json({ success: true, entries: entries.slice(0, maxEntries), source: 'tarball', note: 'Files modified by the forensic scan itself are excluded.' });
     } else {
       // Fallback: live find command
       const script = `find /tmp/forensics/ /var/log/ /etc/ -maxdepth 2 -type f -printf '%T@ %m %u %s %p\\n' 2>/dev/null | sort -rn | head -${maxEntries}`;
@@ -729,6 +729,12 @@ if [ ! -d /opt/uac ]; then
   git clone --depth 1 https://github.com/tclahr/uac /opt/uac 2>/dev/null && echo "[INSTALL] UAC installed to /opt/uac" || echo "[INSTALL] UAC install failed (no git or no network)"
 fi
 
+# Install AVML if not present (memory acquisition for volatility3 analysis)
+if ! command -v avml >/dev/null 2>&1 && [ ! -x /usr/local/bin/avml ]; then
+  echo "[INSTALL] Installing AVML (memory acquisition)..."
+  wget -q https://github.com/microsoft/avml/releases/latest/download/avml -O /usr/local/bin/avml 2>/dev/null && chmod +x /usr/local/bin/avml && echo "[INSTALL] AVML installed to /usr/local/bin/avml" || echo "[INSTALL] AVML install failed (no wget or no network)"
+fi
+
 # Initialize AIDE database if missing
 if command -v aide >/dev/null 2>&1; then
   AIDE_CONF=""
@@ -813,7 +819,7 @@ fi
 
 # Report installed tools
 echo "[INSTALL] === Tool availability ==="
-for tool in rkhunter chkrootkit clamscan aide debsums yara auditctl lsof; do
+for tool in rkhunter chkrootkit clamscan aide debsums yara auditctl lsof avml; do
   if command -v $tool >/dev/null 2>&1; then
     echo "[INSTALL]   $tool: installed"
   else
@@ -1070,7 +1076,8 @@ timeout 30 bash -c 'getcap -r /usr /bin /sbin /opt 2>/dev/null' > "$FDIR/files/c
 timeout 15 bash -c '[ -f /.dockerenv ] && echo "FOUND: /.dockerenv"; grep -q docker /proc/1/cgroup 2>/dev/null && echo "FOUND: docker cgroup"; grep -q lxc /proc/1/cgroup 2>/dev/null && echo "FOUND: lxc cgroup"; cat /proc/1/cgroup 2>/dev/null; echo ""; cat /proc/1/status 2>/dev/null | grep -i cap' > "$FDIR/files/container_indicators.txt"
 timeout 10 bash -c 'docker ps -a 2>/dev/null; echo ""; docker images 2>/dev/null; echo ""; podman ps -a 2>/dev/null; podman images 2>/dev/null' > "$FDIR/files/docker_podman.txt"
 timeout 60 bash -c 'find /var/www /srv/www /opt -type f \\( -name "*.php" -o -name "*.jsp" -o -name "*.asp" -o -name "*.aspx" \\) -exec grep -lE "(eval|exec|system|passthru|shell_exec|popen|proc_open|base64_decode|assert)" {} \\; 2>/dev/null' > "$FDIR/files/webshell_scan.txt"
-timeout 120 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | sort -rn | head -5000' > "$FDIR/files/file_timeline.txt"
+echo "# NOTE: Files modified by the forensic scan itself are excluded from this timeline." > "$FDIR/files/file_timeline.txt"
+timeout 120 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "^[0-9.]+\\t[^ ]+\\t[0-9]+\\t[^ ]+\\t[^ ]+\\t(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/lib/rkhunter/|/var/lib/clamav/|/var/lib/aide/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -5000' >> "$FDIR/files/file_timeline.txt"
 timeout 30 bash -c 'lsattr -R /etc /usr/bin /usr/sbin /home 2>/dev/null' > "$FDIR/files/lsattr.txt"
 timeout 30 bash -c 'ausearch -ts recent -i 2>/dev/null | awk "/^type=PATH/{ path=\\$0 } /^type=SYSCALL/{ if(path) print path \\"\\t\\" \\$0; path=\\"\\" }" 2>/dev/null' > "$FDIR/files/audit_editors.txt"
 
@@ -1097,17 +1104,17 @@ timeout 10 bash -c 'auditctl -l 2>/dev/null || echo "(auditd not available)"; ec
 # =============================================
 echo "[SCAN] Starting security scanners (sequential)..."
 
-echo "[SCAN] 1/7 rkhunter..."
+echo "[SCAN] 1-2/7 rkhunter + chkrootkit (concurrent)..."
 timeout 120 bash -c 'if command -v rkhunter >/dev/null 2>&1; then
   echo "=== Updating rkhunter properties database ==="
   rkhunter --propupd 2>/dev/null || echo "(propupd failed)"
   rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null
-else echo "rkhunter not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/rkhunter_results.txt" 2>&1
-echo "[SCAN] 1/7 rkhunter done"
-
-echo "[SCAN] 2/7 chkrootkit..."
-timeout 90 bash -c 'if command -v chkrootkit >/dev/null 2>&1; then chkrootkit 2>/dev/null; else echo "chkrootkit not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/chkrootkit_results.txt" 2>&1
-echo "[SCAN] 2/7 chkrootkit done"
+else echo "rkhunter not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/rkhunter_results.txt" 2>&1 &
+RKH_PID=$!
+timeout 90 bash -c 'if command -v chkrootkit >/dev/null 2>&1; then chkrootkit 2>/dev/null; else echo "chkrootkit not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/chkrootkit_results.txt" 2>&1 &
+CHK_PID=$!
+wait $RKH_PID $CHK_PID
+echo "[SCAN] 1-2/7 rkhunter + chkrootkit done"
 
 echo "[SCAN] 3/7 ClamAV..."
 timeout 180 bash -c 'if command -v clamscan >/dev/null 2>&1; then
@@ -1182,9 +1189,51 @@ timeout 60 bash -c 'if command -v yara >/dev/null 2>&1; then
 else echo "yara not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/yara_results.txt" 2>&1
 echo "[SCAN] 6/7 YARA done"
 
-echo "[SCAN] 7/7 Volatility status..."
-timeout 10 bash -c 'if command -v vol.py >/dev/null 2>&1; then echo "Volatility 2 available: $(vol.py --info 2>/dev/null | head -1)"; elif command -v vol3 >/dev/null 2>&1 || command -v volatility3 >/dev/null 2>&1; then echo "Volatility 3 available"; elif python3 -c "import volatility3" 2>/dev/null; then echo "Volatility 3 Python module available"; else echo "volatility not installed"; echo "To install: pip3 install volatility3"; fi' > "$FDIR/scanning/volatility_status.txt" 2>&1
-echo "[SCAN] 7/7 Volatility done"
+echo "[SCAN] 7/7 UAC..."
+timeout 600 bash -c 'if [ -d /opt/uac ] && [ -x /opt/uac/uac ]; then
+  echo "=== UAC collection ==="
+  UAC_OUT="/tmp/uac_output_$$"
+  mkdir -p "$UAC_OUT"
+  cd /opt/uac && ./uac -p full "$UAC_OUT" 2>&1 | tail -20
+  if ls "$UAC_OUT"/uac-*.tar.gz 1>/dev/null 2>&1; then
+    UAC_TAR=$(ls "$UAC_OUT"/uac-*.tar.gz | head -1)
+    # Extract select high-value files from UAC into our collection
+    UAC_EXTRACT="/tmp/uac_extract_$$"
+    mkdir -p "$UAC_EXTRACT"
+    tar xzf "$UAC_TAR" -C "$UAC_EXTRACT" --strip-components=1 2>/dev/null
+    # Copy valuable UAC artifacts into our directory structure
+    # Use find since UAC nests files in varying subdirectories
+    uac_copy() { local name="$1" dest="$2"; local f; f=$(find "$UAC_EXTRACT" -name "$name" -type f 2>/dev/null | head -1); [ -n "$f" ] && cp "$f" "$dest" 2>/dev/null; }
+    uac_copy "hidden_pids_for_ps_command.txt" "$FDIR/processes/"
+    uac_copy "running_processes_full_paths.txt" "$FDIR/processes/"
+    uac_copy "hash_executables.md5" "$FDIR/system/"
+    uac_copy "hash_executables.sha1" "$FDIR/system/"
+    uac_copy "world_writable_directories.txt" "$FDIR/files/"
+    uac_copy "world_writable_files.txt" "$FDIR/files/"
+    uac_copy "bodyfile.txt" "$FDIR/files/"
+    uac_copy "loaded_kernel_modules.txt" "$FDIR/system/"
+    # Copy suid/sgid with renamed destination
+    f=$(find "$UAC_EXTRACT" -name "suid.txt" -type f 2>/dev/null | head -1); [ -n "$f" ] && cp "$f" "$FDIR/files/uac_suid.txt" 2>/dev/null
+    f=$(find "$UAC_EXTRACT" -name "sgid.txt" -type f 2>/dev/null | head -1); [ -n "$f" ] && cp "$f" "$FDIR/files/uac_sgid.txt" 2>/dev/null
+    # Copy all of /var/log from UAC (more complete than our selective copies)
+    UAC_VARLOG=$(find "$UAC_EXTRACT" -type d -path "*/var/log" 2>/dev/null | head -1)
+    if [ -n "$UAC_VARLOG" ]; then
+      mkdir -p "$FDIR/logs/var_log_full"
+      cp -r "$UAC_VARLOG"/* "$FDIR/logs/var_log_full/" 2>/dev/null
+      echo "UAC /var/log copied: $(find "$FDIR/logs/var_log_full" -type f | wc -l) files"
+    fi
+    rm -rf "$UAC_EXTRACT"
+    # Archive the UAC tarball
+    cp "$UAC_TAR" "$FDIR/scanning/" 2>/dev/null
+    echo "UAC tarball archived: $(ls -lh "$UAC_TAR" 2>/dev/null)"
+  fi
+  echo "UAC artifacts: $(find "$UAC_OUT" -type f 2>/dev/null | wc -l) files collected"
+  rm -rf "$UAC_OUT"
+else
+  echo "UAC not installed."
+  echo "Install: git clone https://github.com/tclahr/uac /opt/uac"
+fi' > "$FDIR/scanning/uac_results.txt"
+echo "[SCAN] 7/7 UAC done"
 echo "[SCAN] All scanners complete"
 
 # =============================================
@@ -1214,24 +1263,57 @@ cat /proc/buddyinfo > "$FDIR/memory/buddyinfo.txt" 2>/dev/null || true
 `}
 
 # =============================================
-# UAC - Unix-like Artifacts Collector
+# VOLATILITY3 ANALYSIS (runs after memory dump so dump is available)
 # =============================================
-timeout 600 bash -c 'if [ -d /opt/uac ] && [ -x /opt/uac/uac ]; then
-  echo "=== UAC collection ==="
-  UAC_OUT="/tmp/uac_output_$$"
-  mkdir -p "$UAC_OUT"
-  cd /opt/uac && ./uac -p full "$UAC_OUT" 2>&1 | tail -20
-  # Copy any output tarball or files into the forensics dir
-  if ls "$UAC_OUT"/uac-*.tar* 1>/dev/null 2>&1; then
-    cp "$UAC_OUT"/uac-*.tar* "$FDIR/scanning/" 2>/dev/null
-    echo "UAC output: $(ls -lh "$UAC_OUT"/uac-*.tar* 2>/dev/null)"
-  fi
-  echo "UAC artifacts: $(find "$UAC_OUT" -type f 2>/dev/null | wc -l) files collected"
-  rm -rf "$UAC_OUT"
+echo "[ANALYSIS] Running Volatility3 analysis..."
+timeout 300 bash -c 'VOL3=""
+if command -v vol >/dev/null 2>&1; then VOL3="vol"
+elif command -v vol3 >/dev/null 2>&1; then VOL3="vol3"
+elif command -v volatility3 >/dev/null 2>&1; then VOL3="volatility3"
+elif python3 -c "import volatility3.cli" 2>/dev/null; then VOL3="python3 -m volatility3.cli"
+fi
+
+if [ -z "$VOL3" ]; then
+  echo "volatility3 not installed"
+  echo "To install: pip3 install volatility3"
 else
-  echo "UAC not installed."
-  echo "Install: git clone https://github.com/tclahr/uac /opt/uac"
-fi' > "$FDIR/scanning/uac_results.txt"
+  echo "Volatility 3 available: $VOL3"
+  MEMDUMP="$FDIR/memory/memory.lime"
+  if [ -f "$MEMDUMP" ]; then
+    echo ""
+    echo "=== Memory dump found: $(ls -lh "$MEMDUMP") ==="
+    echo ""
+    echo "--- linux.pslist (process listing) ---"
+    $VOL3 -f "$MEMDUMP" linux.pslist 2>&1 || echo "(pslist failed)"
+    echo ""
+    echo "--- linux.pstree (process tree) ---"
+    $VOL3 -f "$MEMDUMP" linux.pstree 2>&1 || echo "(pstree failed)"
+    echo ""
+    echo "--- linux.bash (bash history from memory) ---"
+    $VOL3 -f "$MEMDUMP" linux.bash 2>&1 || echo "(bash failed)"
+    echo ""
+    echo "--- linux.check_syscall (syscall hooks) ---"
+    $VOL3 -f "$MEMDUMP" linux.check_syscall 2>&1 || echo "(check_syscall failed)"
+    echo ""
+    echo "--- linux.check_modules (hidden kernel modules) ---"
+    $VOL3 -f "$MEMDUMP" linux.check_modules 2>&1 || echo "(check_modules failed)"
+    echo ""
+    echo "--- linux.sockstat (network connections) ---"
+    $VOL3 -f "$MEMDUMP" linux.sockstat 2>&1 || echo "(sockstat failed)"
+    echo ""
+    echo "--- linux.elfs (injected ELFs) ---"
+    $VOL3 -f "$MEMDUMP" linux.elfs 2>&1 || echo "(elfs failed)"
+  else
+    echo "No memory dump found at $MEMDUMP — enable memory dump option to run full analysis"
+  fi
+fi' > "$FDIR/scanning/volatility_results.txt" 2>&1
+echo "[ANALYSIS] Volatility3 done"
+
+# Remove memory dump after analysis to avoid multi-GB tarballs
+if [ -f "$FDIR/memory/memory.lime" ]; then
+  echo "[CLEANUP] Removing memory dump ($(ls -lh "$FDIR/memory/memory.lime" | awk '{print $5}')) after analysis"
+  rm -f "$FDIR/memory/memory.lime"
+fi
 
 echo "Comprehensive collection complete"
 `;

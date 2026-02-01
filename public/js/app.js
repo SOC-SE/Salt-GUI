@@ -4181,8 +4181,9 @@
       }
 
       const entries = result.entries;
+      const note = result.note ? `<div style="color:var(--text-secondary);margin-bottom:8px;font-style:italic;">${escapeHtml(result.note)}</div>` : '';
 
-      listEl.innerHTML = `<div class="forensics-timeline-header"><span>Time</span><span>Path</span><span>Perms</span><span>Size</span><span>Owner</span><span>Flags</span><span>Last Editor</span></div>` +
+      listEl.innerHTML = note + `<div class="forensics-timeline-header"><span>Time</span><span>Path</span><span>Perms</span><span>Size</span><span>Owner</span><span>Flags</span><span>Last Editor</span></div>` +
         entries.map(e => {
           const time = e.time ? new Date(e.time).toLocaleString() : '';
           const flagsStyle = e.flags ? 'style="color:var(--status-warning);"' : '';

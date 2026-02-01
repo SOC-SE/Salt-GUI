@@ -717,7 +717,7 @@ if ! command -v vol3 >/dev/null 2>&1 && ! python3 -c "import volatility3" 2>/dev
     fi
   fi
   if command -v pip3 >/dev/null 2>&1; then
-    pip3 install volatility3 2>&1 | tail -3 || echo "[INSTALL] volatility3 install failed"
+    pip3 install --break-system-packages volatility3 2>&1 | tail -3 || echo "[INSTALL] volatility3 install failed"
   else
     echo "[INSTALL] pip3 not available, skipping volatility3"
   fi

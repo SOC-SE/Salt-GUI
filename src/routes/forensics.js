@@ -1256,30 +1256,30 @@ echo ""
 echo "[CATEGORY:suspicious_users]"
 echo "[SEVERITY:high]"
 # UID 0 users (other than root)
-awk -F: '\\$3==0{print \\$1}' /etc/passwd | while read u; do
-  [ "\\$u" != "root" ] && echo "[FINDING] Non-root UID 0 user: \\$u"
+awk -F: '$3==0{print $1}' /etc/passwd | while read u; do
+  [ "$u" != "root" ] && echo "[FINDING] Non-root UID 0 user: $u"
 done
 # Empty passwords
-awk -F: '(\\$2==""){print \\$1}' /etc/shadow 2>/dev/null | while read u; do echo "[FINDING] Empty password: \\$u"; done
+awk -F: '($2==""){print $1}' /etc/shadow 2>/dev/null | while read u; do echo "[FINDING] Empty password: $u"; done
 # Users with shells - only flag non-standard ones (not root, not known system users)
-awk -F: '\\$7 !~ /(nologin|false|sync)/ && \\$3 >= 1000 {print \\$1":"\\$3":"\\$7}' /etc/passwd | while read u; do echo "[FINDING] User with login shell (uid>=1000): \\$u"; done
-awk -F: '\\$7 !~ /(nologin|false|sync)/ && \\$3 > 0 && \\$3 < 1000 && \\$1 !~ /^(root|vagrant|ubuntu|centos|ec2-user|admin|salt|saltadmin)$/ {print \\$1":"\\$3":"\\$7}' /etc/passwd | while read u; do echo "[FINDING] System user with login shell: \\$u"; done
+awk -F: '$7 !~ /(nologin|false|sync)/ && $3 >= 1000 {print $1":"$3":"$7}' /etc/passwd | while read u; do echo "[FINDING] User with login shell (uid>=1000): $u"; done
+awk -F: '$7 !~ /(nologin|false|sync)/ && $3 > 0 && $3 < 1000 && $1 !~ /^(root|vagrant|ubuntu|centos|ec2-user|admin|salt|saltadmin)$/ {print $1":"$3":"$7}' /etc/passwd | while read u; do echo "[FINDING] System user with login shell: $u"; done
 echo ""
 
 echo "[CATEGORY:network_anomalies]"
 echo "[SEVERITY:high]"
 # Only flag unexpected listeners (not salt, ssh, systemd-resolve, chronyd, node)
-ss -tlnp 2>/dev/null | tail -n+2 | grep -vE '(salt-|sshd|systemd-|chronyd|node |ntpd|dnsmasq|unbound)' | while read line; do echo "[FINDING] Unexpected listener: \\$line"; done
+ss -tlnp 2>/dev/null | tail -n+2 | grep -vE '(salt-|sshd|systemd-|chronyd|node |ntpd|dnsmasq|unbound)' | while read line; do echo "[FINDING] Unexpected listener: $line"; done
 # Established connections to unusual destinations (not salt master, not DNS, not localhost)
-ss -tnp state established 2>/dev/null | tail -n+2 | grep -vE '(:4505|:4506|:53 |127\\.0\\.0\\.|::1|:22 )' | while read line; do echo "[FINDING] Non-salt established connection: \\$line"; done
+ss -tnp state established 2>/dev/null | tail -n+2 | grep -vE '(:4505|:4506|:53 |127\\.0\\.0\\.|::1|:22 )' | while read line; do echo "[FINDING] Non-salt established connection: $line"; done
 echo ""
 
 echo "[CATEGORY:suspicious_processes]"
 echo "[SEVERITY:medium]"
 # Only flag actually suspicious processes, not top CPU consumers
-ps aux | grep -iE '(nc -l|ncat -l|ncat -e|nc -e|nmap |socat |/tmp/[^ ]*$|/dev/shm/|reverse|bind.sh|xmrig|minerd|stratum|cryptonight|chisel|ligolo|sliver|cobalt|meterpreter|pspy|linpeas|linenum)' | grep -v grep | while read line; do echo "[FINDING] Suspicious process: \\$line"; done
+ps aux | grep -iE '(nc -l|ncat -l|ncat -e|nc -e|nmap |socat |/tmp/[^ ]*$|/dev/shm/|reverse|bind.sh|xmrig|minerd|stratum|cryptonight|chisel|ligolo|sliver|cobalt|meterpreter|pspy|linpeas|linenum)' | grep -v grep | while read line; do echo "[FINDING] Suspicious process: $line"; done
 # Processes running from /tmp or /dev/shm
-ls -la /proc/*/exe 2>/dev/null | grep -E '(/tmp/|/dev/shm/|/var/tmp/)' | while read line; do echo "[FINDING] Process running from temp dir: \\$line"; done
+ls -la /proc/*/exe 2>/dev/null | grep -E '(/tmp/|/dev/shm/|/var/tmp/)' | while read line; do echo "[FINDING] Process running from temp dir: $line"; done
 echo ""
 
 echo "[CATEGORY:suid_binaries]"
@@ -1287,41 +1287,41 @@ echo "[SEVERITY:medium]"
 # Only flag non-standard SUID binaries
 KNOWN_SUID="mount|umount|su|sudo|passwd|chsh|chfn|newgrp|gpasswd|ping|ping6|traceroute|fusermount|fusermount3|pkexec|crontab|at|ssh-keysign|Xorg|unix_chkpwd|pam_timestamp_check|staprun|userhelper|mount.nfs|mount.cifs|polkit-agent-helper-1|snap-confine|chromium-sandbox|chage|expiry|wall|write|locate|dotlockfile|bwrap|dbus-daemon-launch-helper|ntfs-3g"
 find / -xdev -perm -4000 -type f 2>/dev/null | while read f; do
-  BN=$(basename "\\$f")
-  echo "\\$BN" | grep -qE "^(\\$KNOWN_SUID)$" || echo "[FINDING] Non-standard SUID binary: \\$f"
+  BN=$(basename "$f")
+  echo "$BN" | grep -qE "^($KNOWN_SUID)$" || echo "[FINDING] Non-standard SUID binary: $f"
 done
 echo ""
 
 echo "[CATEGORY:ssh_config]"
 echo "[SEVERITY:medium]"
-cat /root/.ssh/authorized_keys 2>/dev/null | grep -v "^#" | grep -v "^$" | while read key; do echo "[FINDING] Root SSH authorized key: \\$(echo \\$key | awk '{print \\$NF}')"; done
+cat /root/.ssh/authorized_keys 2>/dev/null | grep -v "^#" | grep -v "^$" | while read key; do echo "[FINDING] Root SSH authorized key: $(echo $key | awk '{print $NF}')"; done
 find /home -name authorized_keys -type f 2>/dev/null | while read f; do
-  COUNT=$(grep -c -v "^#" "\\$f" 2>/dev/null | grep -v "^0$")
-  [ -n "\\$COUNT" ] && echo "[FINDING] SSH authorized_keys: \\$f (\\$COUNT keys)"
+  COUNT=$(grep -c -v "^#" "$f" 2>/dev/null | grep -v "^0$")
+  [ -n "$COUNT" ] && echo "[FINDING] SSH authorized_keys: $f ($COUNT keys)"
 done
 echo ""
 
 echo "[CATEGORY:file_integrity]"
 echo "[SEVERITY:medium]"
-find /usr/bin /usr/sbin /bin /sbin -newer /etc/hostname -type f 2>/dev/null | head -20 | while read f; do echo "[FINDING] Modified binary: \\$f"; done
+find /usr/bin /usr/sbin /bin /sbin -newer /etc/hostname -type f 2>/dev/null | head -20 | while read f; do echo "[FINDING] Modified binary: $f"; done
 echo ""
 
 echo "[CATEGORY:kernel_modules]"
 echo "[SEVERITY:medium]"
 # Only flag suspicious/uncommon kernel modules, not all loaded modules
-lsmod 2>/dev/null | tail -n+2 | awk '{print \\$1}' | grep -vE "^(ext4|xfs|btrfs|vfat|fat|nfs|nfsd|overlay|bridge|br_netfilter|ip_tables|ip6_tables|iptable_|ip6table_|nf_|xt_|x_tables|ebtable|ebtables|dm_|sd_|sr_mod|cdrom|ahci|libahci|libata|scsi_|virtio|vmw_|hv_|hyperv|xen_|kvm|irqbypass|drm|i2c_|snd_|soundcore|pcspkr|joydev|input_|hid_|usbhid|ehci|xhci|ohci|uhci|usb_|usbcore|mousedev|evdev|psmouse|serio_raw|atkbd|i8042|rtc_|ptp|pps_|acpi_|button|battery|ac|thermal|processor|fan|intel_|amd_|e1000|igb|ixgb|i40e|bnx|tg3|r8169|sky2|tulip|8139|forcedeth|vmxnet|ena|bonding|veth|macvlan|ipvlan|8021q|garp|mrp|stp|llc|sunrpc|auth_rpcgss|nfsv|lockd|grace|fscache|cachefiles|isofs|udf|squashfs|loop|nbd|fuse|cuse|configfs|efivarfs|autofs|pstore|ramoops|reed_solomon|crc|ghash|aes|sha|md5|crypto_|algif_|af_alg|rng_|drbg|ansi_cprng|lz4|zstd|zlib|deflate|lzo|binfmt_misc|coretemp|edac_|nfit|libnvdimm|nd_|dax|tcp_|udp_|ipv6|unix|af_packet|netlink|rfkill|cfg80211|mac80211|bluetooth|bnep|rfcomm|cls_|sch_|net_cls|net_prio|vhost|vsock|vmci|ppdev|parport|lp|sg|bsg|ses|enclosure|gpio|pinctrl|regulator|watchdog|mei|tpm|rndis|cdc_|raw|iosf_mbi|wmi|video|backlight|dell_|hp_|thinkpad_|ideapad_|asus_|apple_|applesmc|msr|cpuid|fjes|nls_|mac_hid|mptbase|mptsas|mptscsih|mptspi|mptctl|vmw_balloon|vmw_vmci|vmw_vsock|vmwgfx|hv_balloon|hv_utils|hv_kvp|hv_vss|hv_fcopy|hv_netvsc|hv_storvsc|pci_hyperv)" | while read mod; do echo "[FINDING] Uncommon kernel module: \\$mod"; done
+lsmod 2>/dev/null | tail -n+2 | awk '{print $1}' | grep -vE "^(ext4|xfs|btrfs|vfat|fat|nfs|nfsd|overlay|bridge|br_netfilter|ip_tables|ip6_tables|iptable_|ip6table_|nf_|xt_|x_tables|ebtable|ebtables|dm_|sd_|sr_mod|cdrom|ahci|libahci|libata|scsi_|virtio|vmw_|hv_|hyperv|xen_|kvm|irqbypass|drm|i2c_|snd_|soundcore|pcspkr|joydev|input_|hid_|usbhid|ehci|xhci|ohci|uhci|usb_|usbcore|mousedev|evdev|psmouse|serio_raw|atkbd|i8042|rtc_|ptp|pps_|acpi_|button|battery|ac|thermal|processor|fan|intel_|amd_|e1000|igb|ixgb|i40e|bnx|tg3|r8169|sky2|tulip|8139|forcedeth|vmxnet|ena|bonding|veth|macvlan|ipvlan|8021q|garp|mrp|stp|llc|sunrpc|auth_rpcgss|nfsv|lockd|grace|fscache|cachefiles|isofs|udf|squashfs|loop|nbd|fuse|cuse|configfs|efivarfs|autofs|pstore|ramoops|reed_solomon|crc|ghash|aes|sha|md5|crypto_|algif_|af_alg|rng_|drbg|ansi_cprng|lz4|zstd|zlib|deflate|lzo|binfmt_misc|coretemp|edac_|nfit|libnvdimm|nd_|dax|tcp_|udp_|ipv6|unix|af_packet|netlink|rfkill|cfg80211|mac80211|bluetooth|bnep|rfcomm|cls_|sch_|net_cls|net_prio|vhost|vsock|vmci|ppdev|parport|lp|sg|bsg|ses|enclosure|gpio|pinctrl|regulator|watchdog|mei|tpm|rndis|cdc_|raw|iosf_mbi|wmi|video|backlight|dell_|hp_|thinkpad_|ideapad_|asus_|apple_|applesmc|msr|cpuid|fjes|nls_|mac_hid|mptbase|mptsas|mptscsih|mptspi|mptctl|vmw_balloon|vmw_vmci|vmw_vsock|vmwgfx|hv_balloon|hv_utils|hv_kvp|hv_vss|hv_fcopy|hv_netvsc|hv_storvsc|pci_hyperv)" | while read mod; do echo "[FINDING] Uncommon kernel module: $mod"; done
 echo ""
 
 echo "[CATEGORY:scheduled_tasks]"
 echo "[SEVERITY:medium]"
 for user in $(cut -d: -f1 /etc/passwd); do
-  crontab -u "\\$user" -l 2>/dev/null | grep -v "^#" | grep -v "^$" | grep -vE "(apt|unattended|logrotate|anacron|certbot|freshclam|aide|fstrim|e2scrub)" | while read line; do echo "[FINDING] Cron (\\$user): \\$line"; done
+  crontab -u "$user" -l 2>/dev/null | grep -v "^#" | grep -v "^$" | grep -vE "(apt|unattended|logrotate|anacron|certbot|freshclam|aide|fstrim|e2scrub)" | while read line; do echo "[FINDING] Cron ($user): $line"; done
 done
 echo ""
 
 echo "[CATEGORY:log_analysis]"
 echo "[SEVERITY:low]"
-grep -i "failed\\|error\\|denied" /var/log/auth.log 2>/dev/null | tail -10 | while read line; do echo "[FINDING] Auth log: \\$line"; done
+grep -i "failed\\|error\\|denied" /var/log/auth.log 2>/dev/null | tail -10 | while read line; do echo "[FINDING] Auth log: $line"; done
 echo ""
 
 echo "[CATEGORY:environment]"
@@ -1334,7 +1334,7 @@ echo ""
 
 echo "[CATEGORY:docker_containers]"
 echo "[SEVERITY:info]"
-docker ps -a --format '{{.Names}} {{.Status}} {{.Image}}' 2>/dev/null | while read line; do echo "[FINDING] Container: \\$line"; done
+docker ps -a --format '{{.Names}} {{.Status}} {{.Image}}' 2>/dev/null | while read line; do echo "[FINDING] Container: $line"; done
 echo ""
 
 echo "=== ANALYSIS COMPLETE ==="
@@ -1353,7 +1353,7 @@ function buildTargetedAnalysisScript(types, tarball) {
     sections.push(`echo "[CATEGORY:network_anomalies]"; echo "[SEVERITY:high]"; ss -tlnp 2>/dev/null | tail -n+2 | grep -vE '(salt-|sshd|systemd-|chronyd|node |ntpd)' | while read line; do echo "[FINDING] Unexpected listener: $line"; done; ss -tnp state established 2>/dev/null | tail -n+2 | grep -vE '(:4505|:4506|:53 |127\\.0\\.0\\.|::1|:22 )' | while read line; do echo "[FINDING] Non-salt connection: $line"; done`);
   }
   if (types.includes('users')) {
-    sections.push(`echo "[CATEGORY:suspicious_users]"; echo "[SEVERITY:high]"; awk -F: '\\$3==0{print \\$1}' /etc/passwd | while read u; do [ "\\$u" != "root" ] && echo "[FINDING] UID 0: \\$u"; done; awk -F: '(\\$2==""){print \\$1}' /etc/shadow 2>/dev/null | while read u; do echo "[FINDING] Empty password: \\$u"; done; awk -F: '\\$7 !~ /(nologin|false|sync)/ && \\$3 >= 1000 {print \\$1":"\\$3":"\\$7}' /etc/passwd | while read u; do echo "[FINDING] User with shell: \\$u"; done`);
+    sections.push(`echo "[CATEGORY:suspicious_users]"; echo "[SEVERITY:high]"; awk -F: '$3==0{print $1}' /etc/passwd | while read u; do [ "$u" != "root" ] && echo "[FINDING] UID 0: $u"; done; awk -F: '($2==""){print $1}' /etc/shadow 2>/dev/null | while read u; do echo "[FINDING] Empty password: $u"; done; awk -F: '$7 !~ /(nologin|false|sync)/ && $3 >= 1000 {print $1":"$3":"$7}' /etc/passwd | while read u; do echo "[FINDING] User with shell: $u"; done`);
   }
   if (types.includes('processes')) {
     sections.push(`echo "[CATEGORY:suspicious_processes]"; echo "[SEVERITY:medium]"; ps aux | grep -iE '(nc -[le]|ncat -[le]|nmap |socat |/dev/shm/|xmrig|minerd|chisel|ligolo|sliver|cobalt|meterpreter|pspy|linpeas)' | grep -v grep | while read line; do echo "[FINDING] Suspicious: $line"; done; ls -la /proc/*/exe 2>/dev/null | grep -E '(/tmp/|/dev/shm/|/var/tmp/)' | while read line; do echo "[FINDING] Temp dir process: $line"; done`);

@@ -3786,7 +3786,7 @@
         html += `<div class="fr-tree-minion" data-minion="${escapeHtml(minion)}">
           <div class="fr-tree-minion-label">${escapeHtml(minion)} (${files.length} files)</div>
           <div class="fr-tree-artifacts hidden">
-            ${tarballs.map(f => `<div class="fr-tree-artifact" data-minion="${escapeHtml(minion)}" data-path="/tmp/forensics/${escapeHtml(f)}" data-type="tarball">${escapeHtml(f)}</div>`).join('')}
+            ${tarballs.map((f, i) => `<div class="fr-tree-artifact" data-minion="${escapeHtml(minion)}" data-path="/tmp/forensics/${escapeHtml(f)}" data-type="tarball">${escapeHtml(f)}${i === 0 ? ' <span style="color:var(--status-success);font-size:11px;">(latest)</span>' : ''}</div>`).join('')}
             ${plainFiles.map(f => `<div class="fr-tree-artifact" data-minion="${escapeHtml(minion)}" data-path="/tmp/forensics/${escapeHtml(f)}" data-type="file">${escapeHtml(f)}</div>`).join('')}
             ${files.length === 0 ? '<div class="loading" style="font-size:11px;">No artifacts</div>' : ''}
           </div>

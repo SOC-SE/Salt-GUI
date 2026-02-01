@@ -208,7 +208,7 @@ router.get('/jobs', async (req, res) => {
 router.get('/collections', async (req, res) => {
   try {
     // Return only tarball collections, not loose files
-    const result = await saltClient.cmd('*', 'find /tmp/forensics/ -maxdepth 1 -name "*.tar.gz" -type f -printf "%f\\n" 2>/dev/null | sort || echo ""', { shell: '/bin/bash', timeout: 30 });
+    const result = await saltClient.cmd('*', 'find /tmp/forensics/ -maxdepth 1 -name "*.tar.gz" -type f -printf "%f\\n" 2>/dev/null | sort -r || echo ""', { shell: '/bin/bash', timeout: 30 });
     res.json({ success: true, collections: result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

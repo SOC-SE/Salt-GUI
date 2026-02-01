@@ -172,7 +172,7 @@ SaltStack provides:
 │  │  └─────────────────────────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                      │                                       │
-│                                      │ REST API (Port 8000)                  │
+│                                      │ REST API (Port 8001)                  │
 │                                      ▼                                       │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │                         SALT MASTER                                    │  │
@@ -1093,7 +1093,7 @@ logging:
 **salt.yaml:**
 ```yaml
 api:
-  url: "https://localhost:8000"
+  url: "https://localhost:8001"
   eauth: "pam"
   username: "saltadmin"
   # Password stored encrypted or prompted at startup
@@ -1273,7 +1273,7 @@ The Salt Master must have the API enabled:
 ```yaml
 # /etc/salt/master.d/api.conf
 rest_cherrypy:
-  port: 8000
+  port: 8001
   ssl_crt: /etc/salt/pki/api/salt-api.crt
   ssl_key: /etc/salt/pki/api/salt-api.key
   # Or for testing without SSL:
@@ -1510,7 +1510,7 @@ Test individual components in isolation:
 // Test Salt API Client
 describe('SaltAPIClient', () => {
   it('should authenticate successfully', async () => {
-    const client = new SaltAPIClient('https://localhost:8000', 'admin', 'pass');
+    const client = new SaltAPIClient('https://localhost:8001', 'admin', 'pass');
     const token = await client.authenticate();
     expect(token).toBeDefined();
   });
@@ -1585,7 +1585,7 @@ curl -X POST http://localhost:3000/api/commands/run \
 
 ```bash
 # Test Salt Master API directly
-curl -k https://localhost:8000/login \
+curl -k https://localhost:8001/login \
   -d username=saltadmin \
   -d password=password \
   -d eauth=pam
@@ -1793,7 +1793,7 @@ salt-gui/
 ```yaml
 # /etc/salt/master.d/api.conf
 rest_cherrypy:
-  port: 8000
+  port: 8001
   disable_ssl: True  # For testing only!
 
 external_auth:
@@ -1809,7 +1809,7 @@ external_auth:
 ```yaml
 # /etc/salt/master.d/api.conf
 rest_cherrypy:
-  port: 8000
+  port: 8001
   ssl_crt: /etc/salt/pki/api/salt-api.crt
   ssl_key: /etc/salt/pki/api/salt-api.key
   webhook_disable_auth: False

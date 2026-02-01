@@ -916,6 +916,9 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+    # Ensure ReadWritePaths directories exist before service start
+    mkdir -p /var/cache/salt/master/minions
+
     # Reload systemd
     systemctl daemon-reload
 
@@ -956,8 +959,9 @@ configure_firewall() {
         firewall-cmd --permanent --add-port=3000/tcp 2>/dev/null || true
         firewall-cmd --permanent --add-port=4505/tcp 2>/dev/null || true
         firewall-cmd --permanent --add-port=4506/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=8001/tcp 2>/dev/null || true
         firewall-cmd --reload 2>/dev/null || true
-        log_info "Firewalld rules added for ports 3000, 4505, 4506"
+        log_info "Firewalld rules added for ports 3000, 4505, 4506, 8001"
     fi
 
     # Check for ufw (Debian-based)
@@ -966,12 +970,13 @@ configure_firewall() {
         ufw allow 3000/tcp 2>/dev/null || true
         ufw allow 4505/tcp 2>/dev/null || true
         ufw allow 4506/tcp 2>/dev/null || true
-        log_info "UFW rules added for ports 3000, 4505, 4506"
+        ufw allow 8001/tcp 2>/dev/null || true
+        log_info "UFW rules added for ports 3000, 4505, 4506, 8001"
     fi
 
     # Check for iptables (if no firewalld/ufw)
     if ! command -v firewall-cmd &>/dev/null && ! command -v ufw &>/dev/null; then
-        log_info "No firewall detected. Ensure ports 3000, 4505, 4506 are accessible."
+        log_info "No firewall detected. Ensure ports 3000, 4505, 4506, 8001 are accessible."
     fi
 }
 

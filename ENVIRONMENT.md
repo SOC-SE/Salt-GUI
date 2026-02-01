@@ -7,9 +7,9 @@ Network: `192.168.57.0/24` (private, host-only)
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Salt-GUI | http://localhost:3000 | `admin` / `Changeme1!` |
-| Salt API | https://192.168.57.10:8000 | `saltadmin` / `saltadmin` (PAM) |
+| Salt API | https://192.168.57.10:8001 | `saltadmin` / `saltadmin` (PAM) |
 
-Port forwarding from host: `localhost:3000` -> saltmaster:3000, `localhost:8000` -> saltmaster:8000
+Port forwarding from host: `localhost:3000` -> saltmaster:3000, `localhost:8001` -> saltmaster:8001
 
 ## Systems
 
@@ -29,7 +29,7 @@ Port forwarding from host: `localhost:3000` -> saltmaster:3000, `localhost:8000`
 ## Saltmaster Details
 
 - **Salt Master**: runs as root (required for PAM auth)
-- **Salt API**: CherryPy on port 8000 with self-signed SSL
+- **Salt API**: CherryPy on port 8001 with self-signed SSL
 - **Salt-GUI**: Node.js on port 3000, systemd service `salt-gui`
 - **Salt version**: 3007.11
 - **Auto-accept minion keys**: enabled (testing only)

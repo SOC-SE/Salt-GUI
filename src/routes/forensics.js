@@ -9,10 +9,40 @@
 
 const express = require('express');
 const router = express.Router();
+const { execFile } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const { client: saltClient } = require('../lib/salt-client');
 const logger = require('../lib/logger');
 const { requireAuth } = require('../middleware/auth');
 const { auditAction } = require('../middleware/audit');
+
+const MINION_CACHE_BASE = '/var/cache/salt/master/minions';
+
+/**
+ * Get the local path for a cp.push'd artifact, or null if not available.
+ */
+function getLocalArtifactPath(minion, artifactPath) {
+  const rel = artifactPath.replace(/^\//, '');
+  const full = path.join(MINION_CACHE_BASE, minion, 'files', rel);
+  if (!path.resolve(full).startsWith(MINION_CACHE_BASE)) return null;
+  try {
+    if (fs.existsSync(full)) return full;
+  } catch {}
+  return null;
+}
+
+/**
+ * Promise wrapper around execFile for local tar operations.
+ */
+function execLocal(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { maxBuffer: 10 * 1024 * 1024, timeout: 60000, ...opts }, (err, stdout, stderr) => {
+      if (err) return reject(err);
+      resolve({ stdout, stderr });
+    });
+  });
+}
 
 router.use(requireAuth);
 
@@ -45,7 +75,7 @@ router.post('/collect', auditAction('forensics.collect'), async (req, res) => {
   (async () => {
     try {
       const collectScript = buildCollectScript(level);
-      const result = await saltClient.cmd(targets, collectScript, { shell: '/bin/bash', timeout });
+      const result = await saltClient.cmdScript(targets, collectScript, { shell: '/bin/bash', timeout });
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'completed', results: result });
     } catch (error) {
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'failed', error: error.message });
@@ -71,7 +101,7 @@ router.post('/quick-collect', auditAction('forensics.quick_collect'), async (req
   (async () => {
     try {
       const script = buildCollectScript('quick');
-      const result = await saltClient.cmd(targets, script, { shell: '/bin/bash', timeout });
+      const result = await saltClient.cmdScript(targets, script, { shell: '/bin/bash', timeout });
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'completed', results: result });
     } catch (error) {
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'failed', error: error.message });
@@ -97,7 +127,7 @@ router.post('/advanced', auditAction('forensics.advanced'), async (req, res) => 
   (async () => {
     try {
       const script = buildCollectScript('advanced');
-      const result = await saltClient.cmd(targets, script, { shell: '/bin/bash', timeout });
+      const result = await saltClient.cmdScript(targets, script, { shell: '/bin/bash', timeout });
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'completed', results: result });
     } catch (error) {
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'failed', error: error.message });
@@ -112,19 +142,28 @@ router.post('/advanced', auditAction('forensics.advanced'), async (req, res) => 
  * Comprehensive forensic collection with all options
  */
 router.post('/comprehensive', auditAction('forensics.comprehensive'), async (req, res) => {
-  const { targets, memory_dump = false, volatility = false, quick_mode = false, skip_logs = false, timeout = 900 } = req.body;
+  const { targets, memory_dump = false, volatility = false, quick_mode = false, skip_logs = false, auto_install = true, timeout = 900 } = req.body;
   if (!targets) {
     return res.status(400).json({ success: false, error: 'Targets required' });
   }
 
   const jobId = generateJobId();
-  const opts = { memory_dump, volatility, quick_mode, skip_logs };
+  const opts = { memory_dump, volatility, quick_mode, skip_logs, auto_install };
   forensicJobs.set(jobId, { id: jobId, status: 'running', level: 'comprehensive', targets, options: opts, created: new Date().toISOString(), results: null });
 
   (async () => {
     try {
+      // Auto-install forensic tools before scanning (default: on)
+      if (auto_install) {
+        try {
+          const installScript = buildToolInstallScript();
+          await saltClient.cmdScript(targets, installScript, { shell: '/bin/bash', timeout: 180 });
+        } catch (installErr) {
+          logger.warn(`Forensic tool install warning: ${installErr.message}`);
+        }
+      }
       const script = buildCollectScript('comprehensive', opts);
-      const result = await saltClient.cmd(targets, script, { shell: '/bin/bash', timeout });
+      const result = await saltClient.cmdScript(targets, script, { shell: '/bin/bash', timeout });
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'completed', results: result });
     } catch (error) {
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'failed', error: error.message });
@@ -205,6 +244,13 @@ router.post('/artifact-contents', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Target and artifact_path required' });
   }
   try {
+    const localPath = getLocalArtifactPath(target, artifact_path);
+    if (localPath) {
+      const { stdout } = await execLocal('tar', ['tzf', localPath]);
+      const fileList = stdout.split('\n').filter(f => f.trim()).slice(0, 500);
+      res.json({ success: true, files: { [target]: fileList }, local: true });
+      return;
+    }
     const result = await saltClient.cmd(target, `tar tzf '${artifact_path.replace(/'/g, "\\'")}' 2>/dev/null | head -500`, { shell: '/bin/bash', timeout: 60 });
     const files = {};
     for (const [minion, output] of Object.entries(result)) {
@@ -226,6 +272,13 @@ router.post('/artifact-file', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Target, artifact_path, and file_path required' });
   }
   try {
+    const localPath = getLocalArtifactPath(target, artifact_path);
+    if (localPath) {
+      const { stdout } = await execLocal('tar', ['xzf', localPath, '-O', file_path]);
+      const truncated = stdout.split('\n').slice(0, 2000).join('\n');
+      res.json({ success: true, content: { [target]: truncated }, local: true });
+      return;
+    }
     const result = await saltClient.cmd(target, `tar xzf '${artifact_path.replace(/'/g, "\\'")}' -O '${file_path.replace(/'/g, "\\'")}' 2>/dev/null | head -2000`, { shell: '/bin/bash', timeout: 60 });
     res.json({ success: true, content: result });
   } catch (error) {
@@ -307,7 +360,7 @@ router.post('/retrieve', auditAction('forensics.retrieve'), async (req, res) => 
       fun: 'cp.push',
       arg: [artifact_path]
     });
-    res.json({ success: true, result });
+    res.json({ success: true, result, local: true });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -321,7 +374,35 @@ router.post('/cleanup', auditAction('forensics.cleanup'), async (req, res) => {
   const { targets = '*', age_hours = 24 } = req.body;
   try {
     const result = await saltClient.cmd(targets, `find /tmp/forensics/ -type f -mmin +${age_hours * 60} -delete 2>/dev/null; echo "Cleanup complete"`, { shell: '/bin/bash', timeout: 60 });
-    res.json({ success: true, result });
+
+    // Also clean up local cached copies from cp.push
+    let localCleaned = 0;
+    try {
+      const minionDirs = fs.readdirSync(MINION_CACHE_BASE);
+      const ageMs = age_hours * 3600 * 1000;
+      const now = Date.now();
+      for (const minion of minionDirs) {
+        const forensicsDir = path.join(MINION_CACHE_BASE, minion, 'files', 'tmp', 'forensics');
+        if (!fs.existsSync(forensicsDir)) continue;
+        const files = fs.readdirSync(forensicsDir);
+        for (const file of files) {
+          const full = path.join(forensicsDir, file);
+          try {
+            const stat = fs.statSync(full);
+            if (stat.isFile() && (now - stat.mtimeMs) > ageMs) {
+              fs.unlinkSync(full);
+              localCleaned++;
+            }
+          } catch (fileErr) {
+            logger.warn(`Local cache cleanup file error: ${full}: ${fileErr.message}`);
+          }
+        }
+      }
+    } catch (e) {
+      logger.warn(`Local cache cleanup error: ${e.message}`);
+    }
+
+    res.json({ success: true, result, local_cleaned: localCleaned });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -343,7 +424,7 @@ router.post('/analyze', auditAction('forensics.analyze'), async (req, res) => {
 
   try {
     const script = buildAnalysisScript();
-    const result = await saltClient.cmd(target, script, { shell: '/bin/bash', timeout });
+    const result = await saltClient.cmdScript(target, script, { shell: '/bin/bash', timeout });
 
     // Parse results into findings
     const findings = {};
@@ -370,7 +451,7 @@ router.post('/analysis', auditAction('forensics.analysis'), async (req, res) => 
   try {
     const analysisTypes = types.length > 0 ? types : ['rootkit', 'persistence', 'network', 'users', 'processes'];
     const script = buildTargetedAnalysisScript(analysisTypes, tarball_path);
-    const result = await saltClient.cmd(target, script, { shell: '/bin/bash', timeout });
+    const result = await saltClient.cmdScript(target, script, { shell: '/bin/bash', timeout });
 
     const findings = {};
     for (const [minion, output] of Object.entries(result)) {
@@ -492,6 +573,53 @@ function severityLevel(sev) {
   return levels[(sev || '').toLowerCase()] || 0;
 }
 
+function buildToolInstallScript() {
+  return `#!/bin/bash
+set -o pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+echo "[INSTALL] Detecting package manager..."
+if command -v apt-get >/dev/null 2>&1; then
+  echo "[INSTALL] Debian/Ubuntu detected, installing via apt-get..."
+  apt-get update -qq 2>&1 | tail -3
+  apt-get install -y -qq rkhunter chkrootkit clamav debsums aide yara lsof net-tools auditd 2>&1 | tail -5
+  echo "[INSTALL] apt-get done"
+elif command -v dnf >/dev/null 2>&1; then
+  echo "[INSTALL] RHEL/Fedora detected, installing via dnf..."
+  dnf install -y -q rkhunter clamav clamd yara lsof net-tools audit 2>&1 | tail -5
+  echo "[INSTALL] dnf done"
+elif command -v yum >/dev/null 2>&1; then
+  echo "[INSTALL] CentOS/older RHEL detected, installing via yum..."
+  yum install -y -q rkhunter clamav yara lsof net-tools audit 2>&1 | tail -5
+  echo "[INSTALL] yum done"
+fi
+
+# Initialize ClamAV DB if missing
+if command -v freshclam >/dev/null 2>&1; then
+  if [ ! -f /var/lib/clamav/main.cvd ] && [ ! -f /var/lib/clamav/main.cld ]; then
+    echo "[INSTALL] Initializing ClamAV database..."
+    timeout 60 freshclam --quiet 2>/dev/null || echo "[INSTALL] freshclam update skipped"
+  fi
+fi
+
+# Enable auditd
+if command -v auditctl >/dev/null 2>&1; then
+  systemctl enable auditd 2>/dev/null
+  systemctl start auditd 2>/dev/null
+  auditctl -w /etc/passwd -p wa -k user_changes 2>/dev/null
+  auditctl -w /etc/shadow -p wa -k shadow_changes 2>/dev/null
+  auditctl -w /etc/sudoers -p wa -k sudoers_changes 2>/dev/null
+  auditctl -w /etc/crontab -p wa -k crontab_changes 2>/dev/null
+  auditctl -w /etc/cron.d/ -p wa -k cron_d_changes 2>/dev/null
+  auditctl -w /tmp -p x -k tmp_exec 2>/dev/null
+  auditctl -w /dev/shm -p x -k shm_exec 2>/dev/null
+  echo "[INSTALL] auditd configured"
+fi
+
+echo "[INSTALL] Tool installation complete"
+`;
+}
+
 function buildCollectScript(level, opts = {}) {
   const base = `
 export FDIR="/tmp/forensics/.collecting_$$"
@@ -499,6 +627,13 @@ export OUTDIR="/tmp/forensics"
 mkdir -p "$FDIR" "$OUTDIR"
 export TS=$(date +%Y%m%d_%H%M%S)
 export HOST=$(hostname)
+
+# Cleanup trap: kill child processes on exit/timeout to prevent orphans and OOM
+cleanup() {
+  pkill -P $$ 2>/dev/null || true
+}
+trap cleanup EXIT TERM INT
+
 echo '{"collected_at":"'$(date -Iseconds)'","hostname":"'$HOST'","level":"__LEVEL__"}' > "$FDIR/metadata.json"
 `;
 
@@ -638,8 +773,10 @@ timeout 15 bash -c 'ls -la /etc/profile.d/ 2>/dev/null; echo ""; for f in /etc/p
 timeout 15 bash -c 'cat /etc/bash.bashrc 2>/dev/null; echo ""; echo "=== /etc/profile ==="; cat /etc/profile 2>/dev/null' > "$FDIR/persistence/global_bashrc_profile.txt"
 timeout 30 bash -c 'while IFS=: read -r user _ _ _ _ home _; do for rc in .bashrc .profile .bash_profile .bash_login .bash_logout; do [ -f "$home/$rc" ] && echo "=== $user: $home/$rc ===" && cat "$home/$rc" 2>/dev/null; done; done < /etc/passwd' > "$FDIR/persistence/user_rc_files.txt"
 timeout 10 bash -c 'cat /etc/ld.so.preload 2>/dev/null || echo "(not found)"; echo ""; ls -la /etc/ld.so.conf.d/ 2>/dev/null; for f in /etc/ld.so.conf.d/*; do echo "=== $f ==="; cat "$f" 2>/dev/null; done; echo ""; grep -r LD_PRELOAD /etc/environment /etc/profile /etc/profile.d/ 2>/dev/null || echo "(no LD_PRELOAD references)"' > "$FDIR/persistence/ld_preload.txt"
-timeout 10 bash -c 'ls -la /etc/pam.d/ 2>/dev/null; echo ""; echo "=== Suspicious PAM ==="; grep -rE "(pam_exec|pam_script|pam_permit)" /etc/pam.d/ 2>/dev/null || echo "(none)"' > "$FDIR/persistence/pam_config.txt"
+timeout 10 bash -c 'ls -la /etc/pam.d/ 2>/dev/null; echo ""; echo "=== Suspicious PAM modules ==="; grep -rE "(pam_exec|pam_script)" /etc/pam.d/ 2>/dev/null || echo "(none)"; echo ""; echo "=== pam_permit usage (verify these are expected) ==="; grep -rn "pam_permit" /etc/pam.d/ 2>/dev/null | grep -v "^#" | grep -v "other:" || echo "(none outside /etc/pam.d/other)"' > "$FDIR/persistence/pam_config.txt"
 timeout 10 bash -c 'cat /etc/modules 2>/dev/null; echo ""; ls /etc/modules-load.d/ 2>/dev/null' > "$FDIR/persistence/kernel_modules_autoload.txt"
+timeout 15 bash -c 'echo "=== Systemd generators ==="; ls -la /etc/systemd/system-generators/ /usr/local/lib/systemd/system-generators/ /run/systemd/system-generators/ 2>/dev/null || echo "(none)"; echo ""; echo "=== Systemd drop-ins ==="; find /etc/systemd/system /run/systemd/system -name "*.conf" -path "*.d/*" -ls 2>/dev/null; echo ""; echo "=== User services ==="; find /home -path "*/.config/systemd/user/*.service" -ls 2>/dev/null' > "$FDIR/persistence/systemd_generators_dropins.txt"
+timeout 10 bash -c 'echo "=== Motd scripts ==="; ls -la /etc/update-motd.d/ 2>/dev/null; echo ""; echo "=== Bash completion ==="; ls -la /etc/bash_completion.d/ 2>/dev/null | head -30; echo ""; echo "=== XDG autostart ==="; find /etc/xdg/autostart /home -name "*.desktop" -path "*autostart*" -ls 2>/dev/null' > "$FDIR/persistence/other_persistence.txt"
 
 # =============================================
 # USERS & AUTHENTICATION
@@ -661,23 +798,24 @@ timeout 30 bash -c 'while IFS=: read -r user _ _ _ _ home _; do for hist in .bas
 timeout 10 bash -c 'ps auxf 2>/dev/null || ps aux 2>/dev/null' > "$FDIR/processes/ps_full.txt"
 timeout 10 bash -c 'ps aux --sort=-%cpu 2>/dev/null | head -25' > "$FDIR/processes/top_cpu.txt"
 timeout 10 bash -c 'ps aux --sort=-%mem 2>/dev/null | head -25' > "$FDIR/processes/top_memory.txt"
-timeout 10 bash -c 'ps aux | grep -iE "(nc |ncat |socat |/tmp/|/dev/shm/|reverse|bind|shell|xmrig|minerd|stratum|cryptonight)" | grep -v grep' > "$FDIR/processes/suspicious_processes.txt"
-timeout 60 bash -c 'ps -eo pid --sort=-%cpu --no-headers | head -50 | while read pid; do echo "=== PID $pid ==="; echo "exe: $(readlink /proc/$pid/exe 2>/dev/null)"; echo "cmdline: $(tr "\\0" " " < /proc/$pid/cmdline 2>/dev/null)"; echo "cwd: $(readlink /proc/$pid/cwd 2>/dev/null)"; echo ""; done' > "$FDIR/processes/proc_detail.txt"
+timeout 10 bash -c 'ps aux | grep -iE "(nc |ncat |nmap |socat |/tmp/|/dev/shm/|reverse|bind.sh|shell|xmrig|minerd|stratum|cryptonight|chisel|ligolo|sliver|cobalt|meterpreter|pspy|linpeas|linenum|wget .*/\\.|curl .*/\\.|python.*-c.*import|perl.*-e.*socket|ruby.*-e.*socket|php.*-r.*exec)" | grep -v grep' > "$FDIR/processes/suspicious_processes.txt"
+timeout 60 bash -c 'ps -eo pid --sort=-%cpu --no-headers | head -50 | while read pid; do echo "=== PID $pid ==="; echo "exe: $(readlink /proc/$pid/exe 2>/dev/null)"; echo "cmdline: $(tr "\\0" " " < /proc/$pid/cmdline 2>/dev/null)"; echo "cwd: $(readlink /proc/$pid/cwd 2>/dev/null)"; echo "env_suspicious: $(tr "\\0" "\\n" < /proc/$pid/environ 2>/dev/null | grep -iE "(LD_PRELOAD|LD_LIBRARY_PATH|http_proxy|socks)" || true)"; echo ""; done' > "$FDIR/processes/proc_detail.txt"
 timeout 30 bash -c 'find /proc -maxdepth 2 -name exe -exec readlink {} \\; 2>/dev/null | grep "(deleted)"' > "$FDIR/processes/deleted_binaries.txt"
 timeout 30 bash -c 'lsof -nP 2>/dev/null | head -500' > "$FDIR/processes/lsof_full.txt"
+timeout 60 bash -c 'for pid in $(ls /proc/ 2>/dev/null | grep -E "^[0-9]+$" | head -100); do maps=$(cat /proc/$pid/maps 2>/dev/null | grep -vE "(libc|libm|libdl|libpthread|librt|ld-linux|libgcc|libstdc|vdso|vvar|vsyscall|libselinux|libnss|libresolv)" | grep -E "(/tmp/|/dev/shm/|/var/tmp/|\\(deleted\\))" 2>/dev/null); [ -n "$maps" ] && echo "=== PID $pid ($(readlink /proc/$pid/exe 2>/dev/null)) ===" && echo "$maps"; done' > "$FDIR/processes/suspicious_maps.txt"
 
 # =============================================
 # FILES & FILESYSTEM
 # =============================================
-timeout 30 bash -c 'find / -perm -4000 -type f -ls 2>/dev/null' > "$FDIR/files/suid_files.txt"
-timeout 30 bash -c 'find / -perm -2000 -type f -ls 2>/dev/null' > "$FDIR/files/sgid_files.txt"
+timeout 30 bash -c 'find / -xdev -perm -4000 -type f -ls 2>/dev/null' > "$FDIR/files/suid_files.txt"
+timeout 30 bash -c 'find / -xdev -perm -2000 -type f -ls 2>/dev/null' > "$FDIR/files/sgid_files.txt"
 timeout 30 bash -c 'find /etc /usr /var -type f -perm -o+w -ls 2>/dev/null | head -100' > "$FDIR/files/world_writable.txt"
 timeout 60 bash -c 'find /etc /usr/bin /usr/sbin /bin /sbin /var/spool /tmp -type f -mmin -60 -ls 2>/dev/null | head -200' > "$FDIR/files/recently_modified.txt"
 timeout 30 bash -c 'find /home -name ".*" -type f -ls 2>/dev/null | head -100' > "$FDIR/files/hidden_home.txt"
 timeout 15 bash -c 'find /dev/shm -ls 2>/dev/null' > "$FDIR/files/dev_shm.txt"
 timeout 15 bash -c 'find /tmp -ls 2>/dev/null | head -300' > "$FDIR/files/tmp_listing.txt"
 timeout 30 bash -c 'find /tmp /var/tmp /dev/shm /run -type s -o -type p 2>/dev/null | head -100' > "$FDIR/files/sockets_pipes.txt"
-timeout 60 bash -c 'getcap -r / 2>/dev/null' > "$FDIR/files/capabilities.txt"
+timeout 30 bash -c 'getcap -r /usr /bin /sbin /opt 2>/dev/null' > "$FDIR/files/capabilities.txt"
 timeout 15 bash -c '[ -f /.dockerenv ] && echo "FOUND: /.dockerenv"; grep -q docker /proc/1/cgroup 2>/dev/null && echo "FOUND: docker cgroup"; grep -q lxc /proc/1/cgroup 2>/dev/null && echo "FOUND: lxc cgroup"; cat /proc/1/cgroup 2>/dev/null; echo ""; cat /proc/1/status 2>/dev/null | grep -i cap' > "$FDIR/files/container_indicators.txt"
 timeout 10 bash -c 'docker ps -a 2>/dev/null; echo ""; docker images 2>/dev/null; echo ""; podman ps -a 2>/dev/null; podman images 2>/dev/null' > "$FDIR/files/docker_podman.txt"
 timeout 60 bash -c 'find /var/www /srv/www /opt -type f \\( -name "*.php" -o -name "*.jsp" -o -name "*.asp" -o -name "*.aspx" \\) -exec grep -lE "(eval|exec|system|passthru|shell_exec|popen|proc_open|base64_decode|assert)" {} \\; 2>/dev/null' > "$FDIR/files/webshell_scan.txt"
@@ -700,39 +838,130 @@ timeout 15 bash -c 'find /var/log -maxdepth 2 -type f -empty -ls 2>/dev/null; ec
 timeout 10 bash -c 'auditctl -l 2>/dev/null || echo "(auditd not available)"; echo ""; cat /etc/audit/audit.rules 2>/dev/null; cat /etc/audit/rules.d/*.rules 2>/dev/null' > "$FDIR/logs/auditd_rules.txt"
 
 # =============================================
-# SECURITY SCANNING (tool-based)
+# SECURITY SCANNING (tool-based, sequential to prevent OOM)
+# Each scanner runs one at a time to avoid memory exhaustion
 # =============================================
-# rkhunter - rootkit detection
-timeout 120 bash -c 'if command -v rkhunter >/dev/null 2>&1; then rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null; else echo "rkhunter not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/rkhunter_results.txt"
+echo "[SCAN] Starting security scanners (sequential)..."
 
-# chkrootkit - rootkit detection
-timeout 120 bash -c 'if command -v chkrootkit >/dev/null 2>&1; then chkrootkit 2>/dev/null; else echo "chkrootkit not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/chkrootkit_results.txt"
+echo "[SCAN] 1/7 rkhunter..."
+timeout 90 bash -c 'if command -v rkhunter >/dev/null 2>&1; then rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null; else echo "rkhunter not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/rkhunter_results.txt" 2>&1
+echo "[SCAN] 1/7 rkhunter done"
 
-# ClamAV - malware scanning (quick scan of key dirs)
-timeout 180 bash -c 'if command -v clamscan >/dev/null 2>&1; then clamscan --infected --recursive --no-summary /tmp /dev/shm /var/tmp /home 2>/dev/null; echo ""; echo "=== Summary ==="; clamscan --infected --recursive /tmp /dev/shm /var/tmp 2>/dev/null | tail -5; else echo "clamscan not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/clamav_results.txt"
+echo "[SCAN] 2/7 chkrootkit..."
+timeout 90 bash -c 'if command -v chkrootkit >/dev/null 2>&1; then chkrootkit 2>/dev/null; else echo "chkrootkit not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/chkrootkit_results.txt" 2>&1
+echo "[SCAN] 2/7 chkrootkit done"
 
-# AIDE - file integrity (check if initialized)
-timeout 30 bash -c 'if command -v aide >/dev/null 2>&1; then aide --check 2>/dev/null || echo "AIDE database not initialized. Run: aide --init && mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db"; else echo "aide not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/aide_results.txt"
+echo "[SCAN] 3/7 ClamAV..."
+timeout 180 bash -c 'if command -v clamscan >/dev/null 2>&1; then
+  AVAIL_MB=$(awk "/MemAvailable/{print int(\$2/1024)}" /proc/meminfo)
+  if [ "$AVAIL_MB" -lt 800 ]; then
+    echo "Skipping ClamAV (only ${AVAIL_MB}MB available, need 800MB to avoid OOM)"
+  else
+    if [ ! -f /var/lib/clamav/main.cvd ] && [ ! -f /var/lib/clamav/main.cld ]; then
+      echo "=== Virus DB missing, running freshclam ==="
+      timeout 60 freshclam --quiet 2>/dev/null || echo "freshclam failed - scanning without updated DB"
+    fi
+    echo "=== ClamAV scan (${AVAIL_MB}MB available) ==="
+    clamscan --infected --recursive --max-filesize=10M --max-scansize=100M --max-recursion=5 --max-files=1000 --no-mail /tmp /dev/shm /var/tmp /var/www /run /usr/local/bin /opt 2>&1
+  fi
+else echo "clamscan not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/clamav_results.txt" 2>&1
+echo "[SCAN] 3/7 ClamAV done"
 
-# debsums - verify installed package files
-timeout 120 bash -c 'if command -v debsums >/dev/null 2>&1; then debsums -c 2>/dev/null; else echo "debsums not installed (Debian/Ubuntu only)"; fi' > "$FDIR/scanning/debsums_results.txt"
+echo "[SCAN] 4/7 AIDE..."
+timeout 90 bash -c 'if command -v aide >/dev/null 2>&1; then
+  if [ ! -f /var/lib/aide/aide.db ] && [ ! -f /var/lib/aide/aide.db.gz ]; then
+    echo "=== AIDE database not found, initializing ==="
+    aide --init 2>/dev/null
+    if [ -f /var/lib/aide/aide.db.new ]; then
+      mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+      echo "=== Database initialized, running first check ==="
+      aide --check 2>/dev/null || true
+    elif [ -f /var/lib/aide/aide.db.new.gz ]; then
+      mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+      echo "=== Database initialized, running first check ==="
+      aide --check 2>/dev/null || true
+    else
+      echo "AIDE init failed"
+    fi
+  else
+    aide --check 2>/dev/null || true
+  fi
+else echo "aide not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/aide_results.txt" 2>&1
+echo "[SCAN] 4/7 AIDE done"
 
-# YARA - custom rule scanning
-timeout 60 bash -c 'if command -v yara >/dev/null 2>&1; then echo "YARA available: $(yara --version)"; ls /opt/yara-rules/ /etc/yara/ 2>/dev/null; else echo "yara not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/yara_status.txt"
+echo "[SCAN] 5/7 debsums..."
+timeout 90 bash -c 'if command -v debsums >/dev/null 2>&1; then
+  echo "=== Changed files (debsums -c) ==="
+  debsums -c 2>/dev/null || echo "(no changed files)"
+  echo ""
+  echo "=== Missing files (debsums -l) ==="
+  debsums -l 2>/dev/null | head -50
+else echo "debsums not installed (Debian/Ubuntu only)"; fi' > "$FDIR/scanning/debsums_results.txt" 2>&1
+echo "[SCAN] 5/7 debsums done"
 
-# Volatility - memory forensics
-timeout 30 bash -c 'if command -v vol.py >/dev/null 2>&1; then echo "Volatility 2 available: $(vol.py --info 2>/dev/null | head -1)"; elif command -v vol3 >/dev/null 2>&1 || command -v volatility3 >/dev/null 2>&1; then echo "Volatility 3 available"; elif python3 -c "import volatility3" 2>/dev/null; then echo "Volatility 3 Python module available"; else echo "volatility not installed"; echo "To install: pip3 install volatility3"; fi' > "$FDIR/scanning/volatility_status.txt"
+echo "[SCAN] 6/7 YARA..."
+timeout 60 bash -c 'if command -v yara >/dev/null 2>&1; then
+  echo "YARA version: $(yara --version 2>/dev/null)"
+  RULES=""
+  for rdir in /opt/yara-rules /etc/yara /usr/share/yara; do
+    [ -d "$rdir" ] && RULES="$rdir"
+  done
+  if [ -n "$RULES" ]; then
+    echo "=== Scanning with rules from $RULES ==="
+    find "$RULES" -name "*.yar" -o -name "*.yara" 2>/dev/null | while read r; do
+      echo "--- Rule: $r ---"
+      yara -r "$r" /tmp /dev/shm /var/tmp /var/www /run /usr/local/bin /opt 2>/dev/null || true
+    done
+  else
+    echo "No YARA rules found in /opt/yara-rules, /etc/yara, or /usr/share/yara"
+  fi
+else echo "yara not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/yara_results.txt" 2>&1
+echo "[SCAN] 6/7 YARA done"
+
+echo "[SCAN] 7/7 Volatility status..."
+timeout 10 bash -c 'if command -v vol.py >/dev/null 2>&1; then echo "Volatility 2 available: $(vol.py --info 2>/dev/null | head -1)"; elif command -v vol3 >/dev/null 2>&1 || command -v volatility3 >/dev/null 2>&1; then echo "Volatility 3 available"; elif python3 -c "import volatility3" 2>/dev/null; then echo "Volatility 3 Python module available"; else echo "volatility not installed"; echo "To install: pip3 install volatility3"; fi' > "$FDIR/scanning/volatility_status.txt" 2>&1
+echo "[SCAN] 7/7 Volatility done"
+echo "[SCAN] All scanners complete"
 
 # =============================================
-# MEMORY (optional)
+# MEMORY
 # =============================================
-${opts.memory_dump ? `
 cat /proc/meminfo > "$FDIR/memory/meminfo.txt" 2>/dev/null || true
 cat /proc/slabinfo > "$FDIR/memory/slabinfo.txt" 2>/dev/null || true
-cat /proc/buddyinfo > "$FDIR/memory/buddyinfo.txt" 2>/dev/null || true
 cat /proc/vmstat > "$FDIR/memory/vmstat.txt" 2>/dev/null || true
-cat /proc/pagetypeinfo > "$FDIR/memory/pagetypeinfo.txt" 2>/dev/null || true
-` : ''}
+${opts.memory_dump ? `
+# AVML - Acquire Volatile Memory for Linux (full physical memory dump)
+timeout 600 bash -c 'if command -v avml >/dev/null 2>&1; then
+  echo "=== AVML memory acquisition ==="
+  avml "$FDIR/memory/memory.lime" 2>&1 && echo "Memory dump saved: $(ls -lh "$FDIR/memory/memory.lime" 2>/dev/null)" || echo "AVML acquisition failed"
+elif [ -x /opt/avml/avml ]; then
+  echo "=== AVML memory acquisition (from /opt/avml) ==="
+  /opt/avml/avml "$FDIR/memory/memory.lime" 2>&1 && echo "Memory dump saved: $(ls -lh "$FDIR/memory/memory.lime" 2>/dev/null)" || echo "AVML acquisition failed"
+else
+  echo "AVML not installed."
+  echo "Install: wget https://github.com/microsoft/avml/releases/latest/download/avml -O /usr/local/bin/avml && chmod +x /usr/local/bin/avml"
+  echo ""
+  echo "Falling back to /proc info collection"
+  cat /proc/buddyinfo > "$FDIR/memory/buddyinfo.txt" 2>/dev/null || true
+  cat /proc/pagetypeinfo > "$FDIR/memory/pagetypeinfo.txt" 2>/dev/null || true
+fi' > "$FDIR/memory/avml_acquisition.txt"
+` : `
+cat /proc/buddyinfo > "$FDIR/memory/buddyinfo.txt" 2>/dev/null || true
+`}
+
+# =============================================
+# UAC - Unix-like Artifacts Collector
+# =============================================
+timeout 600 bash -c 'if [ -x /opt/uac/uac ] || command -v uac >/dev/null 2>&1; then
+  UAC_BIN=$(command -v uac 2>/dev/null || echo "/opt/uac/uac")
+  echo "=== UAC collection ==="
+  mkdir -p "$FDIR/uac"
+  "$UAC_BIN" -p full -o "$FDIR/uac" 2>&1 | tail -20
+  echo "UAC artifacts: $(find "$FDIR/uac" -type f 2>/dev/null | wc -l) files collected"
+else
+  echo "UAC not installed."
+  echo "Install: git clone https://github.com/tclahr/uac /opt/uac"
+fi' > "$FDIR/scanning/uac_results.txt"
 
 echo "Comprehensive collection complete"
 `;
@@ -764,86 +993,101 @@ echo "[SEVERITY:critical]"
 HIDDEN=$(ps aux | awk '{print $2}' | sort -n | uniq -d)
 if [ -n "$HIDDEN" ]; then echo "[FINDING] Duplicate PIDs detected: $HIDDEN"; fi
 # Check for rootkit files
-for f in /usr/bin/.sshd /tmp/.ice-unix/.x /dev/shm/.x; do
+for f in /usr/bin/.sshd /tmp/.ice-unix/.x /dev/shm/.x /dev/.udev/rules.d /usr/lib/libamplify.so; do
   [ -e "$f" ] && echo "[FINDING] Suspicious file: $f"
 done
 # Check /proc for hidden
 ls /proc/*/exe 2>/dev/null | while read p; do
-  readlink "$p" 2>/dev/null | grep -q '(deleted)' && echo "[FINDING] Deleted binary running: $p"
+  readlink "$p" 2>/dev/null | grep -q '(deleted)' && echo "[FINDING] Deleted binary running: $p ($(cat /proc/$(echo "$p" | cut -d/ -f3)/cmdline 2>/dev/null | tr '\\0' ' ' | head -c 100))"
 done
 echo ""
 
 echo "[CATEGORY:persistence_mechanisms]"
 echo "[SEVERITY:high]"
-# Cron
-crontab -l 2>/dev/null | grep -v "^#" | grep -v "^$" | while read line; do echo "[FINDING] Root cron: $line"; done
-ls /etc/cron.d/ 2>/dev/null | while read f; do echo "[FINDING] Cron.d entry: $f"; done
-# Systemd
-find /etc/systemd/system/ -name "*.service" -newer /etc/hostname 2>/dev/null | while read f; do echo "[FINDING] New systemd service: $f"; done
-# Init
-ls /etc/init.d/ 2>/dev/null | while read f; do echo "[FINDING] Init script: $f"; done
+# Cron - only flag non-standard entries
+crontab -l 2>/dev/null | grep -v "^#" | grep -v "^$" | grep -vE "(apt|unattended|logrotate|anacron|certbot|freshclam|aide|fstrim|e2scrub)" | while read line; do echo "[FINDING] Root cron: $line"; done
+# Cron.d - only flag non-standard entries
+ls /etc/cron.d/ 2>/dev/null | grep -vE "^(e2scrub_all|popularity-contest|sysstat|certbot|0hourly|raid-check|\.placeholder)$" | while read f; do echo "[FINDING] Non-standard cron.d entry: $f"; done
+# Systemd - only new services added after OS install
+find /etc/systemd/system/ -name "*.service" -newer /etc/hostname -not -name "salt-*" -not -name "clamav-*" -not -name "snap*" 2>/dev/null | while read f; do echo "[FINDING] New systemd service: $f"; done
+# Init.d - only flag non-standard
+ls /etc/init.d/ 2>/dev/null | grep -vE "^(README|skeleton|cron|ssh|sshd|rsyslog|networking|udev|procps|kmod|hwclock|keyboard-setup|console-setup|screen-cleanup|dbus|apparmor|ufw|salt-minion|salt-master|salt-api|auditd|halt|killall|single|rc|rcS|sendsigs|umountfs|umountnfs|umountroot|reboot|bootclean|checkfs|checkroot|mtab|cryptdisks|hostname|hwclockfirst|mountall|mountdevsubfs|mountkernfs|mountnfs|urandom)$" | while read f; do echo "[FINDING] Non-standard init script: $f"; done
+# LD_PRELOAD
+[ -s /etc/ld.so.preload ] && echo "[FINDING] ld.so.preload has entries: $(cat /etc/ld.so.preload)"
+grep -rE "LD_PRELOAD" /etc/environment /etc/profile /etc/profile.d/ 2>/dev/null | grep -v "^#" | while read line; do echo "[FINDING] LD_PRELOAD reference: $line"; done
+# Suspicious PAM
+grep -rE "(pam_exec|pam_script)" /etc/pam.d/ 2>/dev/null | grep -v "^#" | while read line; do echo "[FINDING] Suspicious PAM module: $line"; done
 echo ""
 
 echo "[CATEGORY:suspicious_users]"
 echo "[SEVERITY:high]"
-# UID 0 users
-awk -F: '$3==0{print $1}' /etc/passwd | while read u; do
-  [ "$u" != "root" ] && echo "[FINDING] Non-root UID 0 user: $u"
+# UID 0 users (other than root)
+awk -F: '\\$3==0{print \\$1}' /etc/passwd | while read u; do
+  [ "\\$u" != "root" ] && echo "[FINDING] Non-root UID 0 user: \\$u"
 done
-# Users with shells
-awk -F: '$7 !~ /(nologin|false)/ {print $1":"$3":"$7}' /etc/passwd | while read u; do echo "[FINDING] User with shell: $u"; done
 # Empty passwords
-awk -F: '($2==""){print $1}' /etc/shadow 2>/dev/null | while read u; do echo "[FINDING] Empty password: $u"; done
+awk -F: '(\\$2==""){print \\$1}' /etc/shadow 2>/dev/null | while read u; do echo "[FINDING] Empty password: \\$u"; done
+# Users with shells - only flag non-standard ones (not root, not known system users)
+awk -F: '\\$7 !~ /(nologin|false|sync)/ && \\$3 >= 1000 {print \\$1":"\\$3":"\\$7}' /etc/passwd | while read u; do echo "[FINDING] User with login shell (uid>=1000): \\$u"; done
+awk -F: '\\$7 !~ /(nologin|false|sync)/ && \\$3 > 0 && \\$3 < 1000 && \\$1 !~ /^(root|vagrant|ubuntu|centos|ec2-user|admin|salt|saltadmin)$/ {print \\$1":"\\$3":"\\$7}' /etc/passwd | while read u; do echo "[FINDING] System user with login shell: \\$u"; done
 echo ""
 
 echo "[CATEGORY:network_anomalies]"
 echo "[SEVERITY:high]"
-ss -tlnp 2>/dev/null | tail -n+2 | while read line; do echo "[FINDING] Listening: $line"; done
-ss -tnp state established 2>/dev/null | tail -n+2 | while read line; do echo "[FINDING] Established: $line"; done
+# Only flag unexpected listeners (not salt, ssh, systemd-resolve, chronyd, node)
+ss -tlnp 2>/dev/null | tail -n+2 | grep -vE '(salt-|sshd|systemd-|chronyd|node |ntpd|dnsmasq|unbound)' | while read line; do echo "[FINDING] Unexpected listener: \\$line"; done
+# Established connections to unusual destinations (not salt master, not DNS, not localhost)
+ss -tnp state established 2>/dev/null | tail -n+2 | grep -vE '(:4505|:4506|:53 |127\\.0\\.0\\.|::1|:22 )' | while read line; do echo "[FINDING] Non-salt established connection: \\$line"; done
 echo ""
 
 echo "[CATEGORY:suspicious_processes]"
 echo "[SEVERITY:medium]"
-ps aux --sort=-%cpu | head -20 | tail -n+2 | while read line; do echo "[FINDING] Top CPU: $line"; done
-ps aux | grep -E '(nc |ncat |socat |/tmp/|/dev/shm/)' | grep -v grep | while read line; do echo "[FINDING] Suspicious proc: $line"; done
+# Only flag actually suspicious processes, not top CPU consumers
+ps aux | grep -iE '(nc -l|ncat -l|ncat -e|nc -e|nmap |socat |/tmp/[^ ]*$|/dev/shm/|reverse|bind.sh|xmrig|minerd|stratum|cryptonight|chisel|ligolo|sliver|cobalt|meterpreter|pspy|linpeas|linenum)' | grep -v grep | while read line; do echo "[FINDING] Suspicious process: \\$line"; done
+# Processes running from /tmp or /dev/shm
+ls -la /proc/*/exe 2>/dev/null | grep -E '(/tmp/|/dev/shm/|/var/tmp/)' | while read line; do echo "[FINDING] Process running from temp dir: \\$line"; done
 echo ""
 
 echo "[CATEGORY:suid_binaries]"
 echo "[SEVERITY:medium]"
-find / -perm -4000 -type f 2>/dev/null | head -30 | while read f; do echo "[FINDING] SUID: $f"; done
+# Only flag non-standard SUID binaries
+KNOWN_SUID="mount|umount|su|sudo|passwd|chsh|chfn|newgrp|gpasswd|ping|ping6|traceroute|fusermount|fusermount3|pkexec|crontab|at|ssh-keysign|Xorg|unix_chkpwd|pam_timestamp_check|staprun|userhelper|mount.nfs|mount.cifs|polkit-agent-helper-1|snap-confine|chromium-sandbox|chage|expiry|wall|write|locate|dotlockfile|bwrap|dbus-daemon-launch-helper|ntfs-3g"
+find / -xdev -perm -4000 -type f 2>/dev/null | while read f; do
+  BN=$(basename "\\$f")
+  echo "\\$BN" | grep -qE "^(\\$KNOWN_SUID)$" || echo "[FINDING] Non-standard SUID binary: \\$f"
+done
 echo ""
 
 echo "[CATEGORY:ssh_config]"
 echo "[SEVERITY:medium]"
-cat /root/.ssh/authorized_keys 2>/dev/null | while read key; do echo "[FINDING] Root SSH key: $key"; done
-ls -la /home/*/.ssh/authorized_keys 2>/dev/null | while read f; do echo "[FINDING] SSH authorized_keys: $f"; done
+cat /root/.ssh/authorized_keys 2>/dev/null | grep -v "^#" | grep -v "^$" | while read key; do echo "[FINDING] Root SSH authorized key: \\$(echo \\$key | awk '{print \\$NF}')"; done
+find /home -name authorized_keys -type f 2>/dev/null | while read f; do
+  COUNT=$(grep -c -v "^#" "\\$f" 2>/dev/null | grep -v "^0$")
+  [ -n "\\$COUNT" ] && echo "[FINDING] SSH authorized_keys: \\$f (\\$COUNT keys)"
+done
 echo ""
 
 echo "[CATEGORY:file_integrity]"
 echo "[SEVERITY:medium]"
-find /usr/bin /usr/sbin /bin /sbin -newer /etc/hostname -type f 2>/dev/null | head -20 | while read f; do echo "[FINDING] Modified binary: $f"; done
+find /usr/bin /usr/sbin /bin /sbin -newer /etc/hostname -type f 2>/dev/null | head -20 | while read f; do echo "[FINDING] Modified binary: \\$f"; done
 echo ""
 
 echo "[CATEGORY:kernel_modules]"
 echo "[SEVERITY:medium]"
-lsmod 2>/dev/null | tail -n+2 | while read line; do echo "[FINDING] Module: $line"; done
+# Only flag suspicious/uncommon kernel modules, not all loaded modules
+lsmod 2>/dev/null | tail -n+2 | awk '{print \\$1}' | grep -vE "^(ext4|xfs|btrfs|vfat|fat|nfs|nfsd|overlay|bridge|br_netfilter|ip_tables|ip6_tables|iptable_|ip6table_|nf_|xt_|x_tables|ebtable|ebtables|dm_|sd_|sr_mod|cdrom|ahci|libahci|libata|scsi_|virtio|vmw_|hv_|hyperv|xen_|kvm|irqbypass|drm|i2c_|snd_|soundcore|pcspkr|joydev|input_|hid_|usbhid|ehci|xhci|ohci|uhci|usb_|usbcore|mousedev|evdev|psmouse|serio_raw|atkbd|i8042|rtc_|ptp|pps_|acpi_|button|battery|ac|thermal|processor|fan|intel_|amd_|e1000|igb|ixgb|i40e|bnx|tg3|r8169|sky2|tulip|8139|forcedeth|vmxnet|ena|bonding|veth|macvlan|ipvlan|8021q|garp|mrp|stp|llc|sunrpc|auth_rpcgss|nfsv|lockd|grace|fscache|cachefiles|isofs|udf|squashfs|loop|nbd|fuse|cuse|configfs|efivarfs|autofs|pstore|ramoops|reed_solomon|crc|ghash|aes|sha|md5|crypto_|algif_|af_alg|rng_|drbg|ansi_cprng|lz4|zstd|zlib|deflate|lzo|binfmt_misc|coretemp|edac_|nfit|libnvdimm|nd_|dax|tcp_|udp_|ipv6|unix|af_packet|netlink|rfkill|cfg80211|mac80211|bluetooth|bnep|rfcomm|cls_|sch_|net_cls|net_prio|vhost|vsock|vmci|ppdev|parport|lp|sg|bsg|ses|enclosure|gpio|pinctrl|regulator|watchdog|mei|tpm|rndis|cdc_|raw|iosf_mbi|wmi|video|backlight|dell_|hp_|thinkpad_|ideapad_|asus_|apple_|applesmc|msr|cpuid|fjes|nls_|mac_hid|mptbase|mptsas|mptscsih|mptspi|mptctl|vmw_balloon|vmw_vmci|vmw_vsock|vmwgfx|hv_balloon|hv_utils|hv_kvp|hv_vss|hv_fcopy|hv_netvsc|hv_storvsc|pci_hyperv)" | while read mod; do echo "[FINDING] Uncommon kernel module: \\$mod"; done
 echo ""
 
 echo "[CATEGORY:scheduled_tasks]"
 echo "[SEVERITY:medium]"
 for user in $(cut -d: -f1 /etc/passwd); do
-  crontab -u "$user" -l 2>/dev/null | grep -v "^#" | grep -v "^$" | while read line; do echo "[FINDING] Cron ($user): $line"; done
+  crontab -u "\\$user" -l 2>/dev/null | grep -v "^#" | grep -v "^$" | grep -vE "(apt|unattended|logrotate|anacron|certbot|freshclam|aide|fstrim|e2scrub)" | while read line; do echo "[FINDING] Cron (\\$user): \\$line"; done
 done
 echo ""
 
 echo "[CATEGORY:log_analysis]"
 echo "[SEVERITY:low]"
-grep -i "failed\|error\|denied" /var/log/auth.log 2>/dev/null | tail -10 | while read line; do echo "[FINDING] Auth log: $line"; done
-echo ""
-
-echo "[CATEGORY:open_files]"
-echo "[SEVERITY:low]"
-lsof -i -n -P 2>/dev/null | grep LISTEN | head -20 | while read line; do echo "[FINDING] Open listen: $line"; done
+grep -i "failed\\|error\\|denied" /var/log/auth.log 2>/dev/null | tail -10 | while read line; do echo "[FINDING] Auth log: \\$line"; done
 echo ""
 
 echo "[CATEGORY:environment]"
@@ -856,18 +1100,7 @@ echo ""
 
 echo "[CATEGORY:docker_containers]"
 echo "[SEVERITY:info]"
-docker ps -a 2>/dev/null | while read line; do echo "[FINDING] Container: $line"; done
-echo ""
-
-echo "[CATEGORY:mounts]"
-echo "[SEVERITY:info]"
-mount | while read line; do echo "[FINDING] Mount: $line"; done
-echo ""
-
-echo "[CATEGORY:dns_config]"
-echo "[SEVERITY:info]"
-cat /etc/resolv.conf 2>/dev/null | while read line; do echo "[FINDING] DNS: $line"; done
-cat /etc/hosts 2>/dev/null | grep -v "^#" | grep -v "^$" | while read line; do echo "[FINDING] Host entry: $line"; done
+docker ps -a --format '{{.Names}} {{.Status}} {{.Image}}' 2>/dev/null | while read line; do echo "[FINDING] Container: \\$line"; done
 echo ""
 
 echo "=== ANALYSIS COMPLETE ==="
@@ -877,19 +1110,19 @@ echo "=== ANALYSIS COMPLETE ==="
 function buildTargetedAnalysisScript(types, tarball) {
   const sections = [];
   if (types.includes('rootkit')) {
-    sections.push(`echo "[CATEGORY:rootkit_indicators]"; echo "[SEVERITY:critical]"; for f in /usr/bin/.sshd /tmp/.ice-unix/.x /dev/shm/.x; do [ -e "$f" ] && echo "[FINDING] Suspicious file: $f"; done; ls /proc/*/exe 2>/dev/null | while read p; do readlink "$p" 2>/dev/null | grep -q '(deleted)' && echo "[FINDING] Deleted binary: $p"; done`);
+    sections.push(`echo "[CATEGORY:rootkit_indicators]"; echo "[SEVERITY:critical]"; for f in /usr/bin/.sshd /tmp/.ice-unix/.x /dev/shm/.x /dev/.udev/rules.d; do [ -e "$f" ] && echo "[FINDING] Suspicious file: $f"; done; ls /proc/*/exe 2>/dev/null | while read p; do readlink "$p" 2>/dev/null | grep -q '(deleted)' && echo "[FINDING] Deleted binary: $p"; done`);
   }
   if (types.includes('persistence')) {
-    sections.push(`echo "[CATEGORY:persistence_mechanisms]"; echo "[SEVERITY:high]"; crontab -l 2>/dev/null | grep -v "^#" | grep -v "^$" | while read line; do echo "[FINDING] Root cron: $line"; done; find /etc/systemd/system/ -name "*.service" -newer /etc/hostname 2>/dev/null | while read f; do echo "[FINDING] New service: $f"; done`);
+    sections.push(`echo "[CATEGORY:persistence_mechanisms]"; echo "[SEVERITY:high]"; crontab -l 2>/dev/null | grep -v "^#" | grep -v "^$" | grep -vE "(apt|unattended|logrotate|anacron|certbot|freshclam|aide)" | while read line; do echo "[FINDING] Root cron: $line"; done; find /etc/systemd/system/ -name "*.service" -newer /etc/hostname -not -name "salt-*" -not -name "clamav-*" 2>/dev/null | while read f; do echo "[FINDING] New service: $f"; done; [ -s /etc/ld.so.preload ] && echo "[FINDING] ld.so.preload has entries"; grep -rE "(pam_exec|pam_script)" /etc/pam.d/ 2>/dev/null | grep -v "^#" | while read line; do echo "[FINDING] Suspicious PAM: $line"; done`);
   }
   if (types.includes('network')) {
-    sections.push(`echo "[CATEGORY:network_anomalies]"; echo "[SEVERITY:high]"; ss -tlnp 2>/dev/null | tail -n+2 | while read line; do echo "[FINDING] Listening: $line"; done; ss -tnp state established 2>/dev/null | tail -n+2 | while read line; do echo "[FINDING] Established: $line"; done`);
+    sections.push(`echo "[CATEGORY:network_anomalies]"; echo "[SEVERITY:high]"; ss -tlnp 2>/dev/null | tail -n+2 | grep -vE '(salt-|sshd|systemd-|chronyd|node |ntpd)' | while read line; do echo "[FINDING] Unexpected listener: $line"; done; ss -tnp state established 2>/dev/null | tail -n+2 | grep -vE '(:4505|:4506|:53 |127\\.0\\.0\\.|::1|:22 )' | while read line; do echo "[FINDING] Non-salt connection: $line"; done`);
   }
   if (types.includes('users')) {
-    sections.push(`echo "[CATEGORY:suspicious_users]"; echo "[SEVERITY:high]"; awk -F: '$3==0{print $1}' /etc/passwd | while read u; do [ "$u" != "root" ] && echo "[FINDING] UID 0: $u"; done; awk -F: '($2==""){print $1}' /etc/shadow 2>/dev/null | while read u; do echo "[FINDING] Empty password: $u"; done`);
+    sections.push(`echo "[CATEGORY:suspicious_users]"; echo "[SEVERITY:high]"; awk -F: '\\$3==0{print \\$1}' /etc/passwd | while read u; do [ "\\$u" != "root" ] && echo "[FINDING] UID 0: \\$u"; done; awk -F: '(\\$2==""){print \\$1}' /etc/shadow 2>/dev/null | while read u; do echo "[FINDING] Empty password: \\$u"; done; awk -F: '\\$7 !~ /(nologin|false|sync)/ && \\$3 >= 1000 {print \\$1":"\\$3":"\\$7}' /etc/passwd | while read u; do echo "[FINDING] User with shell: \\$u"; done`);
   }
   if (types.includes('processes')) {
-    sections.push(`echo "[CATEGORY:suspicious_processes]"; echo "[SEVERITY:medium]"; ps aux | grep -E '(nc |ncat |socat |/tmp/|/dev/shm/)' | grep -v grep | while read line; do echo "[FINDING] Suspicious: $line"; done`);
+    sections.push(`echo "[CATEGORY:suspicious_processes]"; echo "[SEVERITY:medium]"; ps aux | grep -iE '(nc -[le]|ncat -[le]|nmap |socat |/dev/shm/|xmrig|minerd|chisel|ligolo|sliver|cobalt|meterpreter|pspy|linpeas)' | grep -v grep | while read line; do echo "[FINDING] Suspicious: $line"; done; ls -la /proc/*/exe 2>/dev/null | grep -E '(/tmp/|/dev/shm/|/var/tmp/)' | while read line; do echo "[FINDING] Temp dir process: $line"; done`);
   }
   return sections.join('\necho ""\n');
 }

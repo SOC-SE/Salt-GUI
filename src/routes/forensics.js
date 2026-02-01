@@ -703,12 +703,54 @@ elif command -v yum >/dev/null 2>&1; then
   echo "[INSTALL] yum done"
 fi
 
-# Initialize rkhunter properties DB for first run
-if command -v rkhunter >/dev/null 2>&1; then
-  if [ ! -f /var/lib/rkhunter/db/rkhunter.dat ]; then
-    echo "[INSTALL] Initializing rkhunter properties database..."
-    rkhunter --propupd 2>/dev/null || echo "[INSTALL] rkhunter --propupd failed"
+# Install volatility3 if not present
+if ! command -v vol3 >/dev/null 2>&1 && ! python3 -c "import volatility3" 2>/dev/null; then
+  echo "[INSTALL] Installing volatility3 via pip..."
+  if ! command -v pip3 >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get install -y -qq python3-pip 2>&1 | tail -3
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y -q python3-pip 2>/dev/null || true
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y -q python3-pip 2>/dev/null || true
+    fi
   fi
+  if command -v pip3 >/dev/null 2>&1; then
+    pip3 install volatility3 2>&1 | tail -3 || echo "[INSTALL] volatility3 install failed"
+  else
+    echo "[INSTALL] pip3 not available, skipping volatility3"
+  fi
+fi
+
+# Install UAC if not present
+if [ ! -d /opt/uac ]; then
+  echo "[INSTALL] Installing UAC (Unix-like Artifacts Collector)..."
+  git clone --depth 1 https://github.com/tclahr/uac /opt/uac 2>/dev/null && echo "[INSTALL] UAC installed to /opt/uac" || echo "[INSTALL] UAC install failed (no git or no network)"
+fi
+
+# Initialize AIDE database if missing
+if command -v aide >/dev/null 2>&1; then
+  AIDE_CONF=""
+  [ -f /etc/aide/aide.conf ] && AIDE_CONF="--config /etc/aide/aide.conf"
+  if [ ! -f /var/lib/aide/aide.db ] && [ ! -f /var/lib/aide/aide.db.gz ]; then
+    echo "[INSTALL] Initializing AIDE database..."
+    aide --init $AIDE_CONF 2>/dev/null
+    if [ -f /var/lib/aide/aide.db.new ]; then
+      mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+      echo "[INSTALL] AIDE database initialized"
+    elif [ -f /var/lib/aide/aide.db.new.gz ]; then
+      mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+      echo "[INSTALL] AIDE database initialized"
+    else
+      echo "[INSTALL] AIDE init failed"
+    fi
+  fi
+fi
+
+# Update rkhunter properties DB (always, to capture newly installed packages/users)
+if command -v rkhunter >/dev/null 2>&1; then
+  echo "[INSTALL] Updating rkhunter properties database..."
+  rkhunter --propupd 2>/dev/null || echo "[INSTALL] rkhunter --propupd failed"
 fi
 
 # Initialize ClamAV DB if missing
@@ -781,6 +823,8 @@ for tool in rkhunter chkrootkit clamscan aide debsums yara auditctl lsof; do
   fi
 done
 [ -f /etc/yara/master_community_rules.yar ] && echo "[INSTALL]   yara-rules: present" || echo "[INSTALL]   yara-rules: NOT PRESENT"
+python3 -c "import volatility3" 2>/dev/null && echo "[INSTALL]   volatility3: installed" || echo "[INSTALL]   volatility3: NOT INSTALLED"
+[ -d /opt/uac ] && echo "[INSTALL]   uac: installed" || echo "[INSTALL]   uac: NOT INSTALLED"
 
 echo "[INSTALL] Tool installation complete"
 `;
@@ -1014,10 +1058,8 @@ echo "[SCAN] Starting security scanners (sequential)..."
 
 echo "[SCAN] 1/7 rkhunter..."
 timeout 120 bash -c 'if command -v rkhunter >/dev/null 2>&1; then
-  if [ ! -f /var/lib/rkhunter/db/rkhunter.dat ]; then
-    echo "=== Initializing rkhunter properties database ==="
-    rkhunter --propupd 2>/dev/null || echo "(propupd failed)"
-  fi
+  echo "=== Updating rkhunter properties database ==="
+  rkhunter --propupd 2>/dev/null || echo "(propupd failed)"
   rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null
 else echo "rkhunter not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/rkhunter_results.txt" 2>&1
 echo "[SCAN] 1/7 rkhunter done"
@@ -1048,22 +1090,24 @@ echo "[SCAN] 3/7 ClamAV done"
 
 echo "[SCAN] 4/7 AIDE..."
 timeout 90 bash -c 'if command -v aide >/dev/null 2>&1; then
+  AIDE_CONF=""
+  [ -f /etc/aide/aide.conf ] && AIDE_CONF="--config /etc/aide/aide.conf"
   if [ ! -f /var/lib/aide/aide.db ] && [ ! -f /var/lib/aide/aide.db.gz ]; then
     echo "=== AIDE database not found, initializing ==="
-    aide --init 2>/dev/null
+    aide --init $AIDE_CONF 2>&1 | tail -5
     if [ -f /var/lib/aide/aide.db.new ]; then
       mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
       echo "=== Database initialized, running first check ==="
-      aide --check 2>/dev/null || true
+      aide --check $AIDE_CONF 2>/dev/null || true
     elif [ -f /var/lib/aide/aide.db.new.gz ]; then
       mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
       echo "=== Database initialized, running first check ==="
-      aide --check 2>/dev/null || true
+      aide --check $AIDE_CONF 2>/dev/null || true
     else
-      echo "AIDE init failed"
+      echo "AIDE init failed (check /etc/aide/aide.conf or /etc/aide.conf)"
     fi
   else
-    aide --check 2>/dev/null || true
+    aide --check $AIDE_CONF 2>/dev/null || true
   fi
 else echo "aide not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/aide_results.txt" 2>&1
 echo "[SCAN] 4/7 AIDE done"
@@ -1133,14 +1177,16 @@ cat /proc/buddyinfo > "$FDIR/memory/buddyinfo.txt" 2>/dev/null || true
 # =============================================
 timeout 600 bash -c 'if [ -d /opt/uac ] && [ -x /opt/uac/uac ]; then
   echo "=== UAC collection ==="
-  mkdir -p "$FDIR/uac"
-  cd /opt/uac && ./uac -p full -o "$FDIR/uac" 2>&1 | tail -20
-  echo "UAC artifacts: $(find "$FDIR/uac" -type f 2>/dev/null | wc -l) files collected"
-elif command -v uac >/dev/null 2>&1; then
-  echo "=== UAC collection (PATH) ==="
-  mkdir -p "$FDIR/uac"
-  uac -p full -o "$FDIR/uac" 2>&1 | tail -20
-  echo "UAC artifacts: $(find "$FDIR/uac" -type f 2>/dev/null | wc -l) files collected"
+  UAC_OUT="/tmp/uac_output_$$"
+  mkdir -p "$UAC_OUT"
+  cd /opt/uac && ./uac -p full "$UAC_OUT" 2>&1 | tail -20
+  # Copy any output tarball or files into the forensics dir
+  if ls "$UAC_OUT"/uac-*.tar* 1>/dev/null 2>&1; then
+    cp "$UAC_OUT"/uac-*.tar* "$FDIR/scanning/" 2>/dev/null
+    echo "UAC output: $(ls -lh "$UAC_OUT"/uac-*.tar* 2>/dev/null)"
+  fi
+  echo "UAC artifacts: $(find "$UAC_OUT" -type f 2>/dev/null | wc -l) files collected"
+  rm -rf "$UAC_OUT"
 else
   echo "UAC not installed."
   echo "Install: git clone https://github.com/tclahr/uac /opt/uac"

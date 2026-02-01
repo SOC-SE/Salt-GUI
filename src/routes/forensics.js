@@ -804,13 +804,10 @@ fi
 if command -v auditctl >/dev/null 2>&1; then
   systemctl enable auditd 2>/dev/null
   systemctl start auditd 2>/dev/null
-  auditctl -w /etc/passwd -p wa -k user_changes 2>/dev/null
-  auditctl -w /etc/shadow -p wa -k shadow_changes 2>/dev/null
-  auditctl -w /etc/sudoers -p wa -k sudoers_changes 2>/dev/null
-  auditctl -w /etc/crontab -p wa -k crontab_changes 2>/dev/null
-  auditctl -w /etc/cron.d/ -p wa -k cron_d_changes 2>/dev/null
-  auditctl -w /tmp -p x -k tmp_exec 2>/dev/null
-  auditctl -w /dev/shm -p x -k shm_exec 2>/dev/null
+  # Note: comprehensive audit rules are deployed via Salt state (linux.security.auditd)
+  # Only add minimal runtime rules here as a fallback
+  auditctl -w /etc/passwd -p wa -k etcpasswd 2>/dev/null
+  auditctl -w /etc/shadow -p wa -k etcpasswd 2>/dev/null
   echo "[INSTALL] auditd configured"
 fi
 
@@ -967,7 +964,50 @@ timeout 10 bash -c 'cat /etc/resolv.conf 2>/dev/null' > "$FDIR/network/dns_resol
 timeout 10 bash -c 'cat /etc/hosts 2>/dev/null' > "$FDIR/network/hosts_file.txt"
 timeout 15 bash -c 'iptables-save 2>/dev/null; echo ""; echo "=== nft ==="; nft list ruleset 2>/dev/null; echo ""; echo "=== ufw ==="; ufw status verbose 2>/dev/null' > "$FDIR/network/firewall_rules.txt"
 timeout 10 bash -c 'ip netns list 2>/dev/null || echo "(none)"' > "$FDIR/network/namespaces.txt"
-timeout 15 bash -c 'ss -0 2>/dev/null; echo ""; cat /proc/net/raw 2>/dev/null; echo ""; bpftool prog list 2>/dev/null || echo "(bpftool not available)"' > "$FDIR/network/bpf_raw_sockets.txt"
+timeout 15 bash -c '
+echo "=== Packet sockets (AF_PACKET) ==="
+cat /proc/net/packet 2>/dev/null || echo "(not available)"
+echo ""
+echo "=== Raw sockets ==="
+cat /proc/net/raw 2>/dev/null || echo "(not available)"
+cat /proc/net/raw6 2>/dev/null
+echo ""
+echo "=== ss raw/packet ==="
+ss -0 2>/dev/null
+ss -w 2>/dev/null
+echo ""
+echo "=== BPF programs ==="
+bpftool prog list 2>/dev/null || echo "(bpftool not available)"
+echo ""
+echo "=== BPF maps ==="
+bpftool map list 2>/dev/null || echo "(bpftool not available)"
+echo ""
+echo "=== Processes with raw/packet sockets ==="
+for pid in /proc/[0-9]*/fd; do
+  p=$(dirname "$pid")
+  ls -la "$pid" 2>/dev/null | grep -q "socket:" && {
+    cat "$p/net/packet" 2>/dev/null | grep -v "^sk" | while read line; do
+      echo "PID=$(basename $p) CMD=$(cat $p/cmdline 2>/dev/null | tr "\\0" " ") PACKET_SOCKET: $line"
+    done
+  }
+done 2>/dev/null | head -50
+echo ""
+echo "=== Socket filters (SO_ATTACH_FILTER) ==="
+find /proc/[0-9]*/fdinfo -type f 2>/dev/null | while read fi; do
+  if grep -q "sock_filter" "$fi" 2>/dev/null; then
+    pid=$(echo "$fi" | cut -d/ -f3)
+    echo "PID=$pid CMD=$(cat /proc/$pid/cmdline 2>/dev/null | tr "\\0" " ") HAS_BPF_FILTER"
+  fi
+done | head -20
+echo ""
+echo "=== Processes with CAP_NET_RAW ==="
+for pid in /proc/[0-9]*/status; do
+  if grep -q "CapEff.*0000002" "$pid" 2>/dev/null; then
+    p=$(dirname "$pid")
+    echo "PID=$(basename $p) CMD=$(cat $p/cmdline 2>/dev/null | tr "\\0" " ") CAP_NET_RAW"
+  fi
+done 2>/dev/null | head -20
+' > "$FDIR/network/bpf_raw_sockets.txt"
 
 # =============================================
 # PERSISTENCE MECHANISMS
@@ -1272,6 +1312,20 @@ echo "[SEVERITY:high]"
 ss -tlnp 2>/dev/null | tail -n+2 | grep -vE '(salt-|sshd|systemd-|chronyd|node |ntpd|dnsmasq|unbound)' | while read line; do echo "[FINDING] Unexpected listener: $line"; done
 # Established connections to unusual destinations (not salt master, not DNS, not localhost)
 ss -tnp state established 2>/dev/null | tail -n+2 | grep -vE '(:4505|:4506|:53 |127\\.0\\.0\\.|::1|:22 )' | while read line; do echo "[FINDING] Non-salt established connection: $line"; done
+# Raw/packet sockets (BPFDoor, sniffers, backdoors)
+cat /proc/net/packet 2>/dev/null | tail -n+2 | while read line; do
+  INODE=$(echo "$line" | awk '{print $9}')
+  for pid in /proc/[0-9]*/fd/*; do
+    if readlink "$pid" 2>/dev/null | grep -q "socket:\\[$INODE\\]"; then
+      P=$(echo "$pid" | cut -d/ -f3)
+      CMD=$(cat /proc/$P/cmdline 2>/dev/null | tr '\\0' ' ' | head -c 100)
+      echo "[FINDING] Packet socket (AF_PACKET): PID=$P CMD=$CMD"
+    fi
+  done 2>/dev/null
+done
+cat /proc/net/raw 2>/dev/null | tail -n+2 | while read line; do echo "[FINDING] Raw socket: $line"; done
+# BPF programs (eBPF backdoors)
+bpftool prog list 2>/dev/null | grep -vE "^$" | while read line; do echo "[FINDING] BPF program loaded: $line"; done
 echo ""
 
 echo "[CATEGORY:suspicious_processes]"

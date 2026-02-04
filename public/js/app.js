@@ -3701,10 +3701,11 @@
           // Check if this was a skip_scans collection (Phase 1)
           if (options.skip_scans && !scanJobId) {
             // Display collection results immediately
-            outputEl.textContent = collectionOutput + '\n\n[SCAN] Starting security scans (Phase 2)...';
+            outputEl.textContent = collectionOutput + '\n\n[SCAN] Starting security scans (Phase 2)...\n[SCAN] Scan results will be added to the collection tarball.';
             showToast('Collection complete - starting security scans', 'success');
 
             // Kick off Phase 2 security scans
+            // The scan script auto-discovers and updates the most recent tarball for each host
             try {
               const targets = job.targets;
               const scanResult = await api('/api/forensics/scan', {

@@ -172,7 +172,20 @@ router.post('/comprehensive', auditAction('forensics.comprehensive'), async (req
       }
       const script = buildCollectScript('comprehensive', opts);
       const result = await saltClient.cmdScript(targets, script, { shell: '/bin/bash', timeout: effectiveTimeout });
-      forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'completed', results: result, install_results: installResults });
+
+      // Extract tarball paths from results for each minion
+      const tarballPaths = {};
+      for (const [minion, output] of Object.entries(result)) {
+        if (typeof output === 'string') {
+          // Look for [TARBALL] marker in output
+          const tarballMatch = output.match(/\[TARBALL\] (.+\.tar\.gz)/);
+          if (tarballMatch) {
+            tarballPaths[minion] = tarballMatch[1].trim();
+          }
+        }
+      }
+
+      forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'completed', results: result, install_results: installResults, tarball_paths: tarballPaths });
     } catch (error) {
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'failed', error: error.message });
     }
@@ -241,6 +254,9 @@ router.post('/install-tools', auditAction('forensics.install_tools'), async (req
  * POST /api/forensics/scan
  * Run security scans separately (Phase 2 - slow scanners)
  * This allows collection results to be displayed quickly while scans run in background
+ *
+ * The scan script automatically finds and updates the most recent collection tarball
+ * for each minion, creating a single combined artifact with both collection and scan results.
  */
 router.post('/scan', auditAction('forensics.scan'), async (req, res) => {
   const { targets, memory_dump = false, timeout = 600 } = req.body;
@@ -1227,8 +1243,9 @@ fi' > "$FDIR/memory/avml_acquisition.txt"
 cat /proc/buddyinfo > "$FDIR/memory/buddyinfo.txt" 2>/dev/null || true
 `}
 
+${opts.memory_dump ? `
 # =============================================
-# VOLATILITY3 ANALYSIS (runs after memory dump so dump is available)
+# VOLATILITY3 ANALYSIS (only runs when memory dump is enabled)
 # =============================================
 echo "[ANALYSIS] Running Volatility3 analysis..."
 timeout 300 bash -c 'VOL3=""
@@ -1269,7 +1286,7 @@ else
     echo "--- linux.elfs (injected ELFs) ---"
     $VOL3 -f "$MEMDUMP" linux.elfs 2>&1 || echo "(elfs failed)"
   else
-    echo "No memory dump found at $MEMDUMP — enable memory dump option to run full analysis"
+    echo "AVML memory dump not found at $MEMDUMP"
   fi
 fi' > "$FDIR/scanning/volatility_results.txt" 2>&1
 echo "[ANALYSIS] Volatility3 done"
@@ -1279,6 +1296,10 @@ if [ -f "$FDIR/memory/memory.lime" ]; then
   echo "[CLEANUP] Removing memory dump ($(ls -lh "$FDIR/memory/memory.lime" | awk '{print $5}')) after analysis"
   rm -f "$FDIR/memory/memory.lime"
 fi
+` : `
+# Memory dump not enabled - skip volatility analysis
+echo "[ANALYSIS] Volatility skipped (memory dump not enabled)"
+`}
 
 echo "Comprehensive collection complete"
 `;
@@ -1295,9 +1316,13 @@ echo "Comprehensive collection complete"
 
   // Create tarball from temp dir, then clean up loose files
   script += `
-tar czf "$OUTDIR/forensics_${level}_\${HOST}_\${TS}.tar.gz" -C "$FDIR" . 2>/dev/null
+TARBALL="$OUTDIR/forensics_${level}_\${HOST}_\${TS}.tar.gz"
+tar czf "$TARBALL" -C "$FDIR" . 2>/dev/null
 rm -rf "$FDIR"
-echo "FORENSICS_DONE: $OUTDIR"
+echo ""
+echo "Collection saved to: $OUTDIR"
+echo "[TARBALL] $TARBALL"
+echo "FORENSICS_DONE"
 `;
 
   return script;
@@ -1305,17 +1330,20 @@ echo "FORENSICS_DONE: $OUTDIR"
 
 /**
  * Build script for security scanning only (Phase 2)
- * Runs slow scanners: rkhunter, chkrootkit, clamav, aide, debsums, yara, uac, volatility
+ * Runs slow scanners: rkhunter, chkrootkit, clamav, aide, debsums, yara, uac
+ *
+ * When tarball_path is provided, extracts it first, adds scan results, then updates it.
+ * This creates a single combined artifact with both collection and scan results.
  */
 function buildScanScript(opts = {}) {
   const memoryDump = opts.memory_dump || false;
 
   return `#!/bin/bash
 set -o pipefail
-export FDIR="/tmp/forensics"
+export OUTDIR="/tmp/forensics"
+export FDIR="/tmp/forensics_work_$$"
 export SCAN_DIR="$FDIR/scanning"
-mkdir -p "$SCAN_DIR"
-export TS=$(date +%Y%m%d_%H%M%S)
+export HOST=$(hostname -s 2>/dev/null || echo "unknown")
 
 # Cleanup trap
 cleanup() { pkill -P $$ 2>/dev/null || true; }
@@ -1323,6 +1351,21 @@ trap cleanup EXIT TERM INT
 
 echo "[SCAN_PHASE] Starting security scanners..."
 echo "[SCAN_PHASE] Timestamp: $(date -Iseconds)"
+
+# Find the most recent collection tarball for this host
+TARBALL=$(ls -t "$OUTDIR"/forensics_*_\${HOST}_*.tar.gz 2>/dev/null | head -1)
+
+if [ -n "$TARBALL" ] && [ -f "$TARBALL" ]; then
+  echo "[SCAN_PHASE] Found collection tarball: $TARBALL"
+  mkdir -p "$FDIR"
+  tar xzf "$TARBALL" -C "$FDIR" 2>/dev/null
+  echo "[SCAN_PHASE] Extracted $(find "$FDIR" -type f | wc -l) files"
+else
+  echo "[SCAN_PHASE] No collection tarball found, creating standalone scan"
+  mkdir -p "$FDIR"
+  TARBALL=""
+fi
+mkdir -p "$SCAN_DIR"
 
 # =============================================
 # 1-2. RKHUNTER + CHKROOTKIT (concurrent)
@@ -1493,8 +1536,33 @@ echo "  debsums: $DEBSUMS_CHANGED modified files"
 echo "  yara: $YARA_MATCHES matches"
 echo "  uac: $([ -f "$SCAN_DIR/uac_results.txt" ] && echo "done" || echo "skipped")"
 ${memoryDump ? 'echo "  memory: done"' : 'echo "  memory: skipped"'}
+
+# =============================================
+# UPDATE TARBALL WITH SCAN RESULTS
+# =============================================
+if [ -n "$TARBALL" ] && [ -f "$TARBALL" ]; then
+  echo ""
+  echo "[SCAN_PHASE] Updating tarball with scan results..."
+  # Re-create tarball with both collection and scan data
+  tar czf "$TARBALL" -C "$FDIR" . 2>/dev/null
+  echo "[SCAN_PHASE] Updated: $TARBALL ($(du -h "$TARBALL" | cut -f1))"
+  echo "[TARBALL_UPDATED] $TARBALL"
+else
+  # No original tarball - create new one with just scan results
+  HOST=$(hostname -s 2>/dev/null || echo "unknown")
+  TS=$(date +%Y%m%d_%H%M%S)
+  NEW_TARBALL="$OUTDIR/forensics_scan_\${HOST}_\${TS}.tar.gz"
+  mkdir -p "$OUTDIR"
+  tar czf "$NEW_TARBALL" -C "$FDIR" . 2>/dev/null
+  echo "[SCAN_PHASE] Created: $NEW_TARBALL"
+  echo "[TARBALL_CREATED] $NEW_TARBALL"
+fi
+
+# Cleanup work directory
+rm -rf "$FDIR"
+
 echo ""
-echo "SCAN_DONE: $SCAN_DIR"
+echo "SCAN_DONE"
 `;
 }
 

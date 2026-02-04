@@ -3608,6 +3608,8 @@
       endpoint = '/api/forensics/advanced';
     } else if (level === 'comprehensive') {
       endpoint = '/api/forensics/comprehensive';
+      // Two-phase collection: skip inline scans for fast results, run scans separately
+      body.skip_scans = true;
       if (document.getElementById('fr-opt-memory').checked) body.memory_dump = true;
       if (document.getElementById('fr-opt-volatility').checked) body.volatility = true;
       if (document.getElementById('fr-opt-quick').checked) body.quick_mode = true;
@@ -3678,17 +3680,53 @@
     throw new Error('Timeout waiting for tool installation');
   }
 
-  async function pollForensicsJob(jobId) {
+  async function pollForensicsJob(jobId, scanJobId = null) {
     const outputEl = document.getElementById('fr-collect-output');
+    let collectionOutput = '';
+    let scanOutput = '';
+
     const poll = async () => {
       try {
         const result = await api(`/api/forensics/status/${jobId}`);
-        const status = result.status || (result.job && result.job.status) || 'unknown';
-        const results = result.results || (result.job && result.job.results);
-        const error = result.error || (result.job && result.job.error);
+        const job = result.job || result;
+        const status = job.status || 'unknown';
+        const results = job.results;
+        const error = job.error;
+        const options = job.options || {};
+
         if (status === 'completed' && results) {
-          outputEl.textContent = formatForensicsResults(results);
+          collectionOutput = formatForensicsResults(results);
           loadForensicsJobs();
+
+          // Check if this was a skip_scans collection (Phase 1)
+          if (options.skip_scans && !scanJobId) {
+            // Display collection results immediately
+            outputEl.textContent = collectionOutput + '\n\n[SCAN] Starting security scans (Phase 2)...';
+            showToast('Collection complete - starting security scans', 'success');
+
+            // Kick off Phase 2 security scans
+            try {
+              const targets = job.targets;
+              const scanResult = await api('/api/forensics/scan', {
+                method: 'POST',
+                body: JSON.stringify({
+                  targets,
+                  memory_dump: options.memory_dump || false,
+                  timeout: 600
+                })
+              });
+              if (scanResult.success && scanResult.job_id) {
+                // Continue polling with the scan job
+                pollForensicsJob(jobId, scanResult.job_id);
+              }
+            } catch (scanErr) {
+              outputEl.textContent = collectionOutput + `\n\n[SCAN ERROR] ${scanErr.message}`;
+            }
+            return;
+          }
+
+          // Normal completion (no skip_scans or scans already done)
+          outputEl.textContent = collectionOutput;
           showToast('Collection complete', 'success');
           return;
         } else if (status === 'failed') {
@@ -3697,14 +3735,82 @@
           showToast('Collection failed', 'error');
           return;
         }
+
+        // Still running - show progress
         const elapsed = result.elapsed_ms ? ` (${Math.round(result.elapsed_ms / 1000)}s)` : '';
-        outputEl.textContent = `Job ${jobId}: ${status}${elapsed}`;
+        outputEl.textContent = `Collecting artifacts... ${status}${elapsed}`;
         loadForensicsJobs();
         setTimeout(poll, 3000);
       } catch (err) {
         outputEl.textContent = `Poll error: ${err.message}`;
       }
     };
+
+    // If we have a scan job to poll, poll that instead
+    if (scanJobId) {
+      const pollScan = async () => {
+        try {
+          const result = await api(`/api/forensics/status/${scanJobId}`);
+          const job = result.job || result;
+          const status = job.status || 'unknown';
+          const scanSummary = job.scan_summary;
+
+          if (status === 'completed') {
+            // Format scan summary
+            scanOutput = '\n\n══════════════════════════════════════════\n';
+            scanOutput += '           SECURITY SCAN RESULTS          \n';
+            scanOutput += '══════════════════════════════════════════\n';
+            if (scanSummary) {
+              for (const [minion, summary] of Object.entries(scanSummary)) {
+                scanOutput += `\n── ${minion} ──\n`;
+                for (const [scanner, result] of Object.entries(summary)) {
+                  scanOutput += `  ${scanner}: ${result}\n`;
+                }
+              }
+            } else {
+              scanOutput += 'Scan results available in /tmp/forensics/scanning/\n';
+            }
+            outputEl.textContent = collectionOutput + scanOutput;
+            loadForensicsJobs();
+            showToast('Security scans complete', 'success');
+            return;
+          } else if (status === 'failed') {
+            outputEl.textContent = collectionOutput + `\n\n[SCAN FAILED] ${job.error || 'Unknown error'}`;
+            loadForensicsJobs();
+            return;
+          }
+
+          // Still running - show progress with scan status
+          const results = job.results;
+          let scanProgress = '';
+          if (results) {
+            for (const output of Object.values(results)) {
+              if (typeof output === 'string') {
+                const statusMatch = output.match(/\[SCAN_STATUS\] (.+)/g);
+                if (statusMatch) {
+                  scanProgress = statusMatch[statusMatch.length - 1].replace('[SCAN_STATUS] ', '');
+                }
+              }
+            }
+          }
+          outputEl.textContent = collectionOutput + `\n\n[SCAN] Running security scans... ${scanProgress}`;
+          setTimeout(pollScan, 3000);
+        } catch (err) {
+          outputEl.textContent = collectionOutput + `\n\n[SCAN ERROR] ${err.message}`;
+        }
+      };
+      // Get the collection output first
+      try {
+        const result = await api(`/api/forensics/status/${jobId}`);
+        const job = result.job || result;
+        if (job.results) {
+          collectionOutput = formatForensicsResults(job.results);
+        }
+      } catch (e) { /* ignore */ }
+      setTimeout(pollScan, 1000);
+      return;
+    }
+
     setTimeout(poll, 2000);
   }
 

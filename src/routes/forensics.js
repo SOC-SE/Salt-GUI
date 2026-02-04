@@ -141,15 +141,20 @@ router.post('/advanced', auditAction('forensics.advanced'), async (req, res) => 
 /**
  * POST /api/forensics/comprehensive
  * Comprehensive forensic collection with all options
+ *
+ * When skip_scans=true, collection runs fast (~30s) and returns immediately.
+ * Security scans can then be run separately via /api/forensics/scan for progressive display.
  */
 router.post('/comprehensive', auditAction('forensics.comprehensive'), async (req, res) => {
-  const { targets, memory_dump = false, volatility = false, quick_mode = false, skip_logs = false, auto_install = true, timeout = 900 } = req.body;
+  const { targets, memory_dump = false, volatility = false, quick_mode = false, skip_logs = false, skip_scans = false, auto_install = true, timeout = 900 } = req.body;
   if (!targets) {
     return res.status(400).json({ success: false, error: 'Targets required' });
   }
 
   const jobId = generateJobId();
-  const opts = { memory_dump, volatility, quick_mode, skip_logs, auto_install };
+  const opts = { memory_dump, volatility, quick_mode, skip_logs, skip_scans, auto_install };
+  // Use shorter timeout when skipping scans (collection only takes ~30-60s)
+  const effectiveTimeout = skip_scans ? Math.min(timeout, 180) : timeout;
   forensicJobs.set(jobId, { id: jobId, status: 'running', level: 'comprehensive', targets, options: opts, created: new Date().toISOString(), results: null });
 
   (async () => {
@@ -166,7 +171,7 @@ router.post('/comprehensive', auditAction('forensics.comprehensive'), async (req
         }
       }
       const script = buildCollectScript('comprehensive', opts);
-      const result = await saltClient.cmdScript(targets, script, { shell: '/bin/bash', timeout });
+      const result = await saltClient.cmdScript(targets, script, { shell: '/bin/bash', timeout: effectiveTimeout });
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'completed', results: result, install_results: installResults });
     } catch (error) {
       forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'failed', error: error.message });
@@ -230,6 +235,65 @@ router.post('/install-tools', auditAction('forensics.install_tools'), async (req
   })();
 
   res.json({ success: true, job_id: jobId, message: 'Tool installation started' });
+});
+
+/**
+ * POST /api/forensics/scan
+ * Run security scans separately (Phase 2 - slow scanners)
+ * This allows collection results to be displayed quickly while scans run in background
+ */
+router.post('/scan', auditAction('forensics.scan'), async (req, res) => {
+  const { targets, memory_dump = false, timeout = 600 } = req.body;
+  if (!targets) {
+    return res.status(400).json({ success: false, error: 'Targets required' });
+  }
+
+  const jobId = generateJobId();
+  forensicJobs.set(jobId, {
+    id: jobId,
+    status: 'running',
+    type: 'scan',
+    targets,
+    options: { memory_dump },
+    created: new Date().toISOString(),
+    results: null,
+    scan_progress: {}
+  });
+
+  (async () => {
+    try {
+      const script = buildScanScript({ memory_dump });
+      const result = await saltClient.cmdScript(targets, script, { shell: '/bin/bash', timeout });
+
+      // Parse scan results for summary
+      const scanSummary = {};
+      for (const [minion, output] of Object.entries(result)) {
+        if (typeof output === 'string') {
+          const summary = {};
+          // Extract [SCAN_RESULT] lines
+          const resultMatches = output.match(/\[SCAN_RESULT\] (\w+)=(.+)/g) || [];
+          for (const match of resultMatches) {
+            const m = match.match(/\[SCAN_RESULT\] (\w+)=(.+)/);
+            if (m) summary[m[1]] = m[2].trim();
+          }
+          scanSummary[minion] = summary;
+        }
+      }
+
+      forensicJobs.set(jobId, {
+        ...forensicJobs.get(jobId),
+        status: 'completed',
+        results: result,
+        scan_summary: scanSummary
+      });
+      logger.info(`Security scan job ${jobId} completed`);
+    } catch (error) {
+      forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'failed', error: error.message });
+      logger.error(`Security scan job ${jobId} failed: ${error.message}`);
+    }
+  })();
+
+  res.json({ success: true, job_id: jobId, message: 'Security scan started' });
 });
 
 // ============================================================
@@ -996,7 +1060,12 @@ timeout 10 bash -c 'auditctl -l 2>/dev/null || echo "(auditd not available)"; ec
 # =============================================
 # SECURITY SCANNING (tool-based, sequential to prevent OOM)
 # Each scanner runs one at a time to avoid memory exhaustion
+# When skip_scans is set, scanners run separately via /api/forensics/scan
 # =============================================
+${opts.skip_scans ? `
+echo "[SCAN] Security scanning skipped (run separately via /api/forensics/scan)"
+echo "[SCAN] Collection-only mode for fast results"
+` : `
 echo "[SCAN] Starting security scanners (sequential)..."
 
 echo "[SCAN] 1-2/7 rkhunter + chkrootkit (concurrent)..."
@@ -1130,6 +1199,7 @@ else
 fi' > "$FDIR/scanning/uac_results.txt"
 echo "[SCAN] 7/7 UAC done"
 echo "[SCAN] All scanners complete"
+`}
 
 # =============================================
 # MEMORY
@@ -1231,6 +1301,201 @@ echo "FORENSICS_DONE: $OUTDIR"
 `;
 
   return script;
+}
+
+/**
+ * Build script for security scanning only (Phase 2)
+ * Runs slow scanners: rkhunter, chkrootkit, clamav, aide, debsums, yara, uac, volatility
+ */
+function buildScanScript(opts = {}) {
+  const memoryDump = opts.memory_dump || false;
+
+  return `#!/bin/bash
+set -o pipefail
+export FDIR="/tmp/forensics"
+export SCAN_DIR="$FDIR/scanning"
+mkdir -p "$SCAN_DIR"
+export TS=$(date +%Y%m%d_%H%M%S)
+
+# Cleanup trap
+cleanup() { pkill -P $$ 2>/dev/null || true; }
+trap cleanup EXIT TERM INT
+
+echo "[SCAN_PHASE] Starting security scanners..."
+echo "[SCAN_PHASE] Timestamp: $(date -Iseconds)"
+
+# =============================================
+# 1-2. RKHUNTER + CHKROOTKIT (concurrent)
+# =============================================
+echo "[SCAN_STATUS] rkhunter:running chkrootkit:running"
+timeout 120 bash -c 'if command -v rkhunter >/dev/null 2>&1; then
+  rkhunter --propupd 2>/dev/null || true
+  rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null
+else echo "rkhunter not installed"; fi' > "$SCAN_DIR/rkhunter_results.txt" 2>&1 &
+RKH_PID=$!
+timeout 90 bash -c 'if command -v chkrootkit >/dev/null 2>&1; then chkrootkit 2>/dev/null; else echo "chkrootkit not installed"; fi' > "$SCAN_DIR/chkrootkit_results.txt" 2>&1 &
+CHK_PID=$!
+wait $RKH_PID $CHK_PID
+echo "[SCAN_STATUS] rkhunter:done chkrootkit:done"
+echo "[SCAN_RESULT] rkhunter=$(wc -l < "$SCAN_DIR/rkhunter_results.txt" 2>/dev/null || echo 0) lines"
+echo "[SCAN_RESULT] chkrootkit=$(wc -l < "$SCAN_DIR/chkrootkit_results.txt" 2>/dev/null || echo 0) lines"
+
+# =============================================
+# 3. CLAMAV
+# =============================================
+echo "[SCAN_STATUS] clamav:running"
+timeout 180 bash -c 'if command -v clamscan >/dev/null 2>&1; then
+  AVAIL_MB=$(awk "/MemAvailable/{print int(\\$2/1024)}" /proc/meminfo)
+  if [ "$AVAIL_MB" -lt 800 ]; then
+    echo "Skipping ClamAV (only $AVAIL_MB MB available, need 800MB)"
+  else
+    if [ ! -f /var/lib/clamav/main.cvd ] && [ ! -f /var/lib/clamav/main.cld ]; then
+      timeout 60 freshclam --quiet 2>/dev/null || true
+    fi
+    SCAN_PATHS=""
+    for p in /tmp /dev/shm /var/tmp /var/www /run /usr/local/bin /opt; do
+      [ -d "$p" ] && SCAN_PATHS="$SCAN_PATHS $p"
+    done
+    clamscan --infected --recursive --max-filesize=10M --max-scansize=100M --max-recursion=5 --max-files=1000 $SCAN_PATHS 2>&1
+  fi
+else echo "clamscan not installed"; fi' > "$SCAN_DIR/clamav_results.txt" 2>&1
+echo "[SCAN_STATUS] clamav:done"
+CLAM_INFECTED=$(grep -c "FOUND$" "$SCAN_DIR/clamav_results.txt" 2>/dev/null || echo 0)
+echo "[SCAN_RESULT] clamav=$CLAM_INFECTED infected"
+
+# =============================================
+# 4. AIDE
+# =============================================
+echo "[SCAN_STATUS] aide:running"
+timeout 90 bash -c 'if command -v aide >/dev/null 2>&1; then
+  AIDE_CONF=""
+  [ -f /etc/aide/aide.conf ] && AIDE_CONF="--config /etc/aide/aide.conf"
+  if [ ! -f /var/lib/aide/aide.db ] && [ ! -f /var/lib/aide/aide.db.gz ]; then
+    aide --init $AIDE_CONF 2>&1 | tail -5
+    [ -f /var/lib/aide/aide.db.new ] && mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+    [ -f /var/lib/aide/aide.db.new.gz ] && mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+  fi
+  aide --check $AIDE_CONF 2>/dev/null || true
+else echo "aide not installed"; fi' > "$SCAN_DIR/aide_results.txt" 2>&1
+echo "[SCAN_STATUS] aide:done"
+AIDE_CHANGES=$(grep -cE "^(changed|added|removed):" "$SCAN_DIR/aide_results.txt" 2>/dev/null || echo 0)
+echo "[SCAN_RESULT] aide=$AIDE_CHANGES changes"
+
+# =============================================
+# 5. DEBSUMS
+# =============================================
+echo "[SCAN_STATUS] debsums:running"
+timeout 90 bash -c 'if command -v debsums >/dev/null 2>&1; then
+  echo "=== Changed files ==="
+  debsums -c 2>/dev/null || echo "(none)"
+  echo ""
+  echo "=== Missing files ==="
+  debsums -l 2>/dev/null | head -50
+else echo "debsums not installed (Debian/Ubuntu only)"; fi' > "$SCAN_DIR/debsums_results.txt" 2>&1
+echo "[SCAN_STATUS] debsums:done"
+DEBSUMS_CHANGED=$(grep -v "^===" "$SCAN_DIR/debsums_results.txt" 2>/dev/null | grep -c "." || echo 0)
+echo "[SCAN_RESULT] debsums=$DEBSUMS_CHANGED files"
+
+# =============================================
+# 6. YARA
+# =============================================
+echo "[SCAN_STATUS] yara:running"
+timeout 120 bash -c 'if command -v yara >/dev/null 2>&1; then
+  RULES=""
+  [ -f /etc/yara/master_community_rules.yar ] && RULES="/etc/yara/master_community_rules.yar"
+  [ -z "$RULES" ] && for rdir in /opt/yara-rules /etc/yara /usr/share/yara; do [ -d "$rdir" ] && RULES="$rdir"; done
+  if [ -n "$RULES" ]; then
+    echo "Scanning with: $RULES"
+    if [ -f "$RULES" ]; then
+      yara -r "$RULES" /tmp /dev/shm /var/tmp /var/www /run /usr/local/bin /opt 2>/dev/null || true
+    else
+      find "$RULES" -name "*.yar" -o -name "*.yara" 2>/dev/null | while read r; do
+        yara -r "$r" /tmp /dev/shm /var/tmp 2>/dev/null || true
+      done
+    fi
+  else
+    echo "No YARA rules found"
+  fi
+else echo "yara not installed"; fi' > "$SCAN_DIR/yara_results.txt" 2>&1
+echo "[SCAN_STATUS] yara:done"
+YARA_MATCHES=$(grep -cv "^Scanning\\|^$\\|^yara\\|^No YARA" "$SCAN_DIR/yara_results.txt" 2>/dev/null || echo 0)
+echo "[SCAN_RESULT] yara=$YARA_MATCHES matches"
+
+# =============================================
+# 7. UAC (optional, slower)
+# =============================================
+echo "[SCAN_STATUS] uac:running"
+timeout 300 bash -c 'if [ -d /opt/uac ] && [ -x /opt/uac/uac ]; then
+  UAC_OUT="/tmp/uac_scan_$$"
+  mkdir -p "$UAC_OUT"
+  cd /opt/uac && ./uac -p ir_triage "$UAC_OUT" 2>&1 | tail -10
+  if ls "$UAC_OUT"/uac-*.tar.gz 1>/dev/null 2>&1; then
+    UAC_TAR=$(ls "$UAC_OUT"/uac-*.tar.gz | head -1)
+    cp "$UAC_TAR" "$SCAN_DIR/" 2>/dev/null
+    echo "UAC tarball: $(basename "$UAC_TAR")"
+  fi
+  rm -rf "$UAC_OUT"
+else echo "UAC not installed"; fi' > "$SCAN_DIR/uac_results.txt" 2>&1
+echo "[SCAN_STATUS] uac:done"
+
+${memoryDump ? `
+# =============================================
+# 8. MEMORY DUMP + VOLATILITY
+# =============================================
+echo "[SCAN_STATUS] memory:running"
+timeout 600 bash -c 'MEMDUMP="$SCAN_DIR/memory.lime"
+if command -v avml >/dev/null 2>&1; then
+  avml "$MEMDUMP" 2>&1 && echo "Memory dump: $(ls -lh "$MEMDUMP" 2>/dev/null)"
+elif [ -x /opt/avml/avml ]; then
+  /opt/avml/avml "$MEMDUMP" 2>&1 && echo "Memory dump: $(ls -lh "$MEMDUMP" 2>/dev/null)"
+else
+  echo "AVML not installed, skipping memory dump"
+fi' > "$SCAN_DIR/memory_acquisition.txt" 2>&1
+echo "[SCAN_STATUS] memory:done"
+
+echo "[SCAN_STATUS] volatility:running"
+timeout 300 bash -c 'VOL3=""
+if command -v vol >/dev/null 2>&1; then VOL3="vol"
+elif command -v vol3 >/dev/null 2>&1; then VOL3="vol3"
+elif python3 -c "import volatility3.cli" 2>/dev/null; then VOL3="python3 -m volatility3.cli"
+fi
+MEMDUMP="$SCAN_DIR/memory.lime"
+if [ -n "$VOL3" ] && [ -f "$MEMDUMP" ]; then
+  echo "--- linux.pslist ---"
+  $VOL3 -f "$MEMDUMP" linux.pslist 2>&1 || true
+  echo ""
+  echo "--- linux.bash ---"
+  $VOL3 -f "$MEMDUMP" linux.bash 2>&1 || true
+  echo ""
+  echo "--- linux.check_syscall ---"
+  $VOL3 -f "$MEMDUMP" linux.check_syscall 2>&1 || true
+else
+  echo "Volatility3 not available or no memory dump"
+fi
+# Remove dump after analysis
+rm -f "$MEMDUMP"' > "$SCAN_DIR/volatility_results.txt" 2>&1
+echo "[SCAN_STATUS] volatility:done"
+` : `
+echo "[SCAN_STATUS] memory:skipped volatility:skipped"
+`}
+
+# =============================================
+# SUMMARY
+# =============================================
+echo ""
+echo "[SCAN_PHASE] All scanners complete"
+echo "[SCAN_SUMMARY]"
+echo "  rkhunter: $([ -f "$SCAN_DIR/rkhunter_results.txt" ] && echo "done" || echo "failed")"
+echo "  chkrootkit: $([ -f "$SCAN_DIR/chkrootkit_results.txt" ] && echo "done" || echo "failed")"
+echo "  clamav: $CLAM_INFECTED infected files"
+echo "  aide: $AIDE_CHANGES changes detected"
+echo "  debsums: $DEBSUMS_CHANGED modified files"
+echo "  yara: $YARA_MATCHES matches"
+echo "  uac: $([ -f "$SCAN_DIR/uac_results.txt" ] && echo "done" || echo "skipped")"
+${memoryDump ? 'echo "  memory: done"' : 'echo "  memory: skipped"'}
+echo ""
+echo "SCAN_DONE: $SCAN_DIR"
+`;
 }
 
 function buildAnalysisScript() {

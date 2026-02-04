@@ -197,6 +197,41 @@ router.get('/jobs', async (req, res) => {
   res.json({ success: true, jobs });
 });
 
+/**
+ * POST /api/forensics/install-tools
+ * Install forensic tools on targets (standalone or before collection)
+ */
+router.post('/install-tools', auditAction('forensics.install_tools'), async (req, res) => {
+  const { targets, timeout = 300 } = req.body;
+  if (!targets) {
+    return res.status(400).json({ success: false, error: 'Targets required' });
+  }
+
+  const jobId = generateJobId();
+  forensicJobs.set(jobId, {
+    id: jobId,
+    status: 'running',
+    type: 'install-tools',
+    targets,
+    created: new Date().toISOString(),
+    results: null
+  });
+
+  (async () => {
+    try {
+      const script = buildToolInstallScript();
+      const result = await saltClient.cmdScript(targets, script, { shell: '/bin/bash', timeout });
+      forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'completed', results: result });
+      logger.info(`Forensic tools install job ${jobId} completed`);
+    } catch (error) {
+      forensicJobs.set(jobId, { ...forensicJobs.get(jobId), status: 'failed', error: error.message });
+      logger.error(`Forensic tools install job ${jobId} failed: ${error.message}`);
+    }
+  })();
+
+  res.json({ success: true, job_id: jobId, message: 'Tool installation started' });
+});
+
 // ============================================================
 // Artifact Endpoints
 // ============================================================
@@ -678,160 +713,20 @@ function severityLevel(sev) {
 }
 
 function buildToolInstallScript() {
-  return `#!/bin/bash
-set -o pipefail
-export DEBIAN_FRONTEND=noninteractive
-
-echo "[INSTALL] Detecting package manager..."
-if command -v apt-get >/dev/null 2>&1; then
-  echo "[INSTALL] Debian/Ubuntu detected, installing via apt-get..."
-  apt-get update -qq 2>&1 | tail -3
-  apt-get install -y -qq rkhunter chkrootkit clamav debsums aide yara lsof net-tools auditd git 2>&1 | tail -5
-  echo "[INSTALL] apt-get done"
-elif command -v dnf >/dev/null 2>&1; then
-  echo "[INSTALL] RHEL/Fedora detected, installing via dnf..."
-  dnf install -y -q epel-release 2>/dev/null || true
-  for pkg in rkhunter chkrootkit clamav clamd aide yara lsof net-tools audit git; do
-    dnf install -y -q $pkg 2>/dev/null || echo "[INSTALL] dnf: $pkg not available, skipping"
-  done
-  echo "[INSTALL] dnf done"
-elif command -v yum >/dev/null 2>&1; then
-  echo "[INSTALL] CentOS/older RHEL detected, installing via yum..."
-  yum install -y -q epel-release 2>/dev/null || true
-  for pkg in rkhunter chkrootkit clamav aide yara lsof net-tools audit git; do
-    yum install -y -q $pkg 2>/dev/null || true
-  done
-  echo "[INSTALL] yum done"
-fi
-
-# Install volatility3 if not present
-if ! command -v vol3 >/dev/null 2>&1 && ! python3 -c "import volatility3" 2>/dev/null; then
-  echo "[INSTALL] Installing volatility3 via pip..."
-  if ! command -v pip3 >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-      apt-get install -y -qq python3-pip 2>&1 | tail -3
-    elif command -v dnf >/dev/null 2>&1; then
-      dnf install -y -q python3-pip 2>/dev/null || true
-    elif command -v yum >/dev/null 2>&1; then
-      yum install -y -q python3-pip 2>/dev/null || true
-    fi
-  fi
-  if command -v pip3 >/dev/null 2>&1; then
-    pip3 install --break-system-packages volatility3 2>&1 | tail -3 || echo "[INSTALL] volatility3 install failed"
-  else
-    echo "[INSTALL] pip3 not available, skipping volatility3"
-  fi
-fi
-
-# Install UAC if not present
-if [ ! -d /opt/uac ]; then
-  echo "[INSTALL] Installing UAC (Unix-like Artifacts Collector)..."
-  git clone --depth 1 https://github.com/tclahr/uac /opt/uac 2>/dev/null && echo "[INSTALL] UAC installed to /opt/uac" || echo "[INSTALL] UAC install failed (no git or no network)"
-fi
-
-# Install AVML if not present (memory acquisition for volatility3 analysis)
-if ! command -v avml >/dev/null 2>&1 && [ ! -x /usr/local/bin/avml ]; then
-  echo "[INSTALL] Installing AVML (memory acquisition)..."
-  wget -q https://github.com/microsoft/avml/releases/latest/download/avml -O /usr/local/bin/avml 2>/dev/null && chmod +x /usr/local/bin/avml && echo "[INSTALL] AVML installed to /usr/local/bin/avml" || echo "[INSTALL] AVML install failed (no wget or no network)"
-fi
-
-# Initialize AIDE database if missing
-if command -v aide >/dev/null 2>&1; then
-  AIDE_CONF=""
-  [ -f /etc/aide/aide.conf ] && AIDE_CONF="--config /etc/aide/aide.conf"
-  if [ ! -f /var/lib/aide/aide.db ] && [ ! -f /var/lib/aide/aide.db.gz ]; then
-    echo "[INSTALL] Initializing AIDE database..."
-    aide --init $AIDE_CONF 2>/dev/null
-    if [ -f /var/lib/aide/aide.db.new ]; then
-      mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
-      echo "[INSTALL] AIDE database initialized"
-    elif [ -f /var/lib/aide/aide.db.new.gz ]; then
-      mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
-      echo "[INSTALL] AIDE database initialized"
-    else
-      echo "[INSTALL] AIDE init failed"
-    fi
-  fi
-fi
-
-# Update rkhunter properties DB (always, to capture newly installed packages/users)
-if command -v rkhunter >/dev/null 2>&1; then
-  echo "[INSTALL] Updating rkhunter properties database..."
-  rkhunter --propupd 2>/dev/null || echo "[INSTALL] rkhunter --propupd failed"
-fi
-
-# Initialize ClamAV DB if missing
-if command -v freshclam >/dev/null 2>&1; then
-  if [ ! -f /var/lib/clamav/main.cvd ] && [ ! -f /var/lib/clamav/main.cld ]; then
-    echo "[INSTALL] Initializing ClamAV database..."
-    timeout 60 freshclam --quiet 2>/dev/null || echo "[INSTALL] freshclam update skipped"
-  fi
-fi
-
-# Download YARA community rules if not present
-if command -v yara >/dev/null 2>&1; then
-  if [ ! -f /etc/yara/master_community_rules.yar ]; then
-    echo "[INSTALL] Downloading YARA community rules..."
-    CLONE_DIR="/tmp/signature-base"
-    YARA_DIR="/etc/yara"
-    mkdir -p "$YARA_DIR"
-    rm -rf "$CLONE_DIR"
-    if git clone --depth 1 https://github.com/neo23x0/signature-base.git "$CLONE_DIR" 2>/dev/null; then
-      # Remove problematic rules that break compilation
-      for pattern in "*3cx*" "*screenconnect*" "*vcruntime*" "*base64_pe*" "*poisonivy*" "*Linux_Sudops*" \\
-        "*gen_susp_obfuscation.yar*" "*apt_barracuda_esg_unc4841_jun23.yar*" "*apt_cobaltstrike.yar*" \\
-        "*apt_tetris.yar*" "*configured_vulns_ext_vars.yar*" "*expl_citrix_netscaler_adc_exploitation_cve_2023_3519.yar*" \\
-        "*expl_cleo_dec24.yar*" "*expl_commvault_cve_2025_57791.yar*" "*expl_outlook_cve_2023_23397.yar*" \\
-        "*gen_fake_amsi_dll.yar*" "*gen_gcti_cobaltstrike.yar*" "*gen_susp_js_obfuscatorio.yar*" \\
-        "*gen_susp_xor.yar*" "*gen_webshells_ext_vars.yar*" "*gen_xor_hunting.yar*" "*general_cloaking.yar*" \\
-        "*generic_anomalies.yar*" "*mal_lockbit_lnx_macos_apr23.yar*" "*thor-hacktools.yar*" \\
-        "*thor_inverse_matches.yar*" "*vuln_paloalto_cve_2024_3400_apr24.yar*" \\
-        "*yara-rules_vuln_drivers_strict_renamed.yar*" "*yara_mixed_ext_vars.yar*"; do
-        find "$CLONE_DIR/yara" -type f -name "$pattern" -delete 2>/dev/null || true
-      done
-      # Combine into master rule file
-      find "$CLONE_DIR/yara" -type f \\( -name "*.yar" -o -name "*.yara" \\) -print0 | xargs -0 cat > "$YARA_DIR/master_community_rules.yar" 2>/dev/null
-      chmod 644 "$YARA_DIR/master_community_rules.yar"
-      rm -rf "$CLONE_DIR"
-      if yara -C "$YARA_DIR/master_community_rules.yar" /dev/null 2>/dev/null; then
-        echo "[INSTALL] YARA rules compiled successfully"
-      else
-        echo "[INSTALL] YARA rules have compilation warnings (partial rules still usable)"
-      fi
-    else
-      echo "[INSTALL] YARA rules download failed (no git or no network)"
-    fi
-  else
-    echo "[INSTALL] YARA rules already present"
-  fi
-fi
-
-# Enable auditd
-if command -v auditctl >/dev/null 2>&1; then
-  systemctl enable auditd 2>/dev/null
-  systemctl start auditd 2>/dev/null
-  # Note: comprehensive audit rules are deployed via Salt state (linux.security.auditd)
-  # Only add minimal runtime rules here as a fallback
-  auditctl -w /etc/passwd -p wa -k etcpasswd 2>/dev/null
-  auditctl -w /etc/shadow -p wa -k etcpasswd 2>/dev/null
-  echo "[INSTALL] auditd configured"
-fi
-
-# Report installed tools
-echo "[INSTALL] === Tool availability ==="
-for tool in rkhunter chkrootkit clamscan aide debsums yara auditctl lsof avml; do
-  if command -v $tool >/dev/null 2>&1; then
-    echo "[INSTALL]   $tool: installed"
-  else
-    echo "[INSTALL]   $tool: NOT INSTALLED"
-  fi
-done
-[ -f /etc/yara/master_community_rules.yar ] && echo "[INSTALL]   yara-rules: present" || echo "[INSTALL]   yara-rules: NOT PRESENT"
-python3 -c "import volatility3" 2>/dev/null && echo "[INSTALL]   volatility3: installed" || echo "[INSTALL]   volatility3: NOT INSTALLED"
-[ -d /opt/uac ] && echo "[INSTALL]   uac: installed" || echo "[INSTALL]   uac: NOT INSTALLED"
-
-echo "[INSTALL] Tool installation complete"
+  // Read from external script file for maintainability and testability
+  const scriptPath = path.join(__dirname, '../../scripts/linux/security/install-forensics-tools.sh');
+  try {
+    return fs.readFileSync(scriptPath, 'utf8');
+  } catch (err) {
+    logger.error(`Failed to read install-forensics-tools.sh: ${err.message}`);
+    // Fallback to minimal inline script if file not found
+    return `#!/bin/bash
+set -euo pipefail
+echo "[ERROR] install-forensics-tools.sh not found at ${scriptPath}"
+echo "[ERROR] Please ensure the script exists in scripts/linux/security/"
+exit 1
 `;
+  }
 }
 
 function buildCollectScript(level, opts = {}) {

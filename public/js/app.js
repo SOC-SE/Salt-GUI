@@ -3585,12 +3585,15 @@
     if (autoInstall) {
       outputEl.textContent = 'Installing missing forensics tools...';
       try {
-        const installCmd = 'export DEBIAN_FRONTEND=noninteractive; if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq rkhunter chkrootkit clamav clamav-daemon debsums aide yara strace ltrace tcpdump auditd lsof net-tools python3-pip git 2>&1 | tail -10; elif command -v dnf >/dev/null 2>&1; then dnf install -y rkhunter clamav strace ltrace tcpdump audit lsof net-tools python3-pip git 2>&1 | tail -10; elif command -v yum >/dev/null 2>&1; then yum install -y rkhunter clamav strace ltrace tcpdump audit lsof net-tools python3-pip git 2>&1 | tail -10; fi; echo ""; echo "=== Installing volatility3 via pip ==="; pip3 install volatility3 2>&1 | tail -5 || pip3 install --break-system-packages volatility3 2>&1 | tail -5 || echo "volatility3 pip install failed"; echo ""; echo "=== Installing AVML (memory acquisition) ==="; if ! command -v avml >/dev/null 2>&1; then ARCH=$(uname -m); if [ "$ARCH" = "x86_64" ]; then wget -q https://github.com/microsoft/avml/releases/latest/download/avml -O /usr/local/bin/avml && chmod +x /usr/local/bin/avml && echo "AVML installed" || echo "AVML download failed"; else echo "AVML only supports x86_64 (current: $ARCH)"; fi; else echo "AVML already installed"; fi; echo ""; echo "=== Installing UAC (Unix-like Artifacts Collector) ==="; if [ ! -d /opt/uac ]; then git clone --depth 1 https://github.com/tclahr/uac /opt/uac 2>&1 | tail -5 && chmod +x /opt/uac/uac && echo "UAC installed to /opt/uac" || echo "UAC clone failed"; else echo "UAC already installed at /opt/uac"; fi; echo ""; echo "=== Enabling auditd ==="; systemctl enable auditd 2>/dev/null; systemctl start auditd 2>/dev/null; echo "=== Adding audit watches ==="; auditctl -w /etc/passwd -p wa -k user_changes 2>/dev/null; auditctl -w /etc/shadow -p wa -k shadow_changes 2>/dev/null; auditctl -w /etc/sudoers -p wa -k sudoers_changes 2>/dev/null; auditctl -w /etc/ssh/sshd_config -p wa -k sshd_config 2>/dev/null; auditctl -w /etc/crontab -p wa -k crontab_changes 2>/dev/null; auditctl -w /etc/cron.d/ -p wa -k cron_d_changes 2>/dev/null; auditctl -w /etc/pam.d/ -p wa -k pam_changes 2>/dev/null; auditctl -w /etc/ld.so.preload -p wa -k ld_preload 2>/dev/null; auditctl -w /etc/profile.d/ -p wa -k profile_d 2>/dev/null; auditctl -w /etc/systemd/system/ -p wa -k systemd_changes 2>/dev/null; auditctl -w /tmp -p x -k tmp_exec 2>/dev/null; auditctl -w /dev/shm -p x -k shm_exec 2>/dev/null; echo ""; echo "=== Initializing ClamAV DB ==="; freshclam --quiet 2>/dev/null || echo "freshclam update skipped"; echo "Install and audit setup complete"';
-        await api('/api/commands/run', {
+        const installResult = await api('/api/forensics/install-tools', {
           method: 'POST',
-          body: JSON.stringify({ targets, command: installCmd, shell: 'bash', timeout: 120 })
+          body: JSON.stringify({ targets, timeout: 300 })
         });
-        outputEl.textContent = 'Tool installation done. Starting collection...';
+        if (installResult.job_id) {
+          // Wait for install job to complete before proceeding
+          await waitForForensicsInstallJob(installResult.job_id, outputEl);
+        }
+        outputEl.textContent = 'Tool installation complete. Starting collection...';
       } catch (e) {
         outputEl.textContent = `Install warning: ${e.message}. Proceeding with collection...`;
       }
@@ -3639,6 +3642,40 @@
       outputEl.textContent = `Error: ${error.message}`;
       showToast('Collection failed', 'error');
     }
+  }
+
+  /**
+   * Wait for a forensics install job to complete (blocking poll)
+   */
+  async function waitForForensicsInstallJob(jobId, outputEl, maxWaitMs = 300000) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < maxWaitMs) {
+      const result = await api(`/api/forensics/status/${jobId}`);
+      const status = result.status || (result.job && result.job.status);
+      if (status === 'completed') {
+        // Parse results for any failures
+        const results = result.results || (result.job && result.job.results);
+        if (results) {
+          let failCount = 0;
+          for (const output of Object.values(results)) {
+            if (typeof output === 'string' && output.includes('[RESULT] FAILED:')) {
+              failCount += (output.match(/\[RESULT\] FAILED:/g) || []).length;
+            }
+          }
+          if (failCount > 0) {
+            outputEl.textContent = `Tool install complete (${failCount} tools failed - check logs). Starting collection...`;
+          }
+        }
+        return result;
+      }
+      if (status === 'failed') {
+        throw new Error(result.error || (result.job && result.job.error) || 'Install job failed');
+      }
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      outputEl.textContent = `Installing forensics tools... (${elapsed}s)`;
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    throw new Error('Timeout waiting for tool installation');
   }
 
   async function pollForensicsJob(jobId) {

@@ -154,7 +154,8 @@ router.post('/comprehensive', auditAction('forensics.comprehensive'), async (req
   const jobId = generateJobId();
   const opts = { memory_dump, volatility, quick_mode, skip_logs, skip_scans, auto_install };
   // Use shorter timeout when skipping scans (collection only takes ~30-60s)
-  const effectiveTimeout = skip_scans ? Math.min(timeout, 180) : timeout;
+  // But if memory dump/volatility is enabled, allow more time
+  const effectiveTimeout = skip_scans && !memory_dump ? Math.min(timeout, 180) : timeout;
   forensicJobs.set(jobId, { id: jobId, status: 'running', level: 'comprehensive', targets, options: opts, created: new Date().toISOString(), results: null });
 
   (async () => {
@@ -1079,8 +1080,8 @@ timeout 10 bash -c 'auditctl -l 2>/dev/null || echo "(auditd not available)"; ec
 # When skip_scans is set, scanners run separately via /api/forensics/scan
 # =============================================
 ${opts.skip_scans ? `
-echo "[SCAN] Security scanning skipped (run separately via /api/forensics/scan)"
-echo "[SCAN] Collection-only mode for fast results"
+echo "[SCAN] Collection complete — security scans will start automatically (Phase 2)"
+echo "[SCAN] Scans run separately for faster initial results"
 ` : `
 echo "[SCAN] Starting security scanners (sequential)..."
 
@@ -1111,7 +1112,7 @@ timeout 180 bash -c 'if command -v clamscan >/dev/null 2>&1; then
     for p in /tmp /dev/shm /var/tmp /var/www /run /usr/local/bin /opt; do
       [ -d "$p" ] && SCAN_PATHS="$SCAN_PATHS $p"
     done
-    clamscan --infected --recursive --max-filesize=10M --max-scansize=100M --max-recursion=5 --max-files=1000 $SCAN_PATHS 2>&1
+    clamscan --infected --recursive --max-filesize=10M --max-scansize=100M --max-recursion=5 --max-files=1000 $SCAN_PATHS 2>/dev/null
   fi
 else echo "clamscan not installed - use Auto-Install Tools to install"; fi' > "$FDIR/scanning/clamav_results.txt" 2>&1
 echo "[SCAN] 3/7 ClamAV done"
@@ -1322,7 +1323,7 @@ rm -rf "$FDIR"
 echo ""
 echo "Collection saved to: $OUTDIR"
 echo "[TARBALL] $TARBALL"
-echo "FORENSICS_DONE"
+echo "FORENSICS_DONE:$OUTDIR"
 `;
 
   return script;
@@ -1399,7 +1400,7 @@ timeout 180 bash -c 'if command -v clamscan >/dev/null 2>&1; then
     for p in /tmp /dev/shm /var/tmp /var/www /run /usr/local/bin /opt; do
       [ -d "$p" ] && SCAN_PATHS="$SCAN_PATHS $p"
     done
-    clamscan --infected --recursive --max-filesize=10M --max-scansize=100M --max-recursion=5 --max-files=1000 $SCAN_PATHS 2>&1
+    clamscan --infected --recursive --max-filesize=10M --max-scansize=100M --max-recursion=5 --max-files=1000 $SCAN_PATHS 2>/dev/null
   fi
 else echo "clamscan not installed"; fi' > "$SCAN_DIR/clamav_results.txt" 2>&1
 echo "[SCAN_STATUS] clamav:done"
@@ -1450,10 +1451,13 @@ timeout 120 bash -c 'if command -v yara >/dev/null 2>&1; then
   if [ -n "$RULES" ]; then
     echo "Scanning with: $RULES"
     if [ -f "$RULES" ]; then
-      yara -r "$RULES" /tmp /dev/shm /var/tmp /var/www /run /usr/local/bin /opt 2>/dev/null || true
+      # Scan only regular files to avoid flex scanner errors on sockets/pipes
+      for scandir in /tmp /dev/shm /var/tmp /var/www /run /usr/local/bin /opt; do
+        [ -d "$scandir" ] && find "$scandir" -type f -size -10M 2>/dev/null | head -500 | xargs -r yara -r "$RULES" 2>/dev/null || true
+      done
     else
-      find "$RULES" -name "*.yar" -o -name "*.yara" 2>/dev/null | while read r; do
-        yara -r "$r" /tmp /dev/shm /var/tmp 2>/dev/null || true
+      find "$RULES" -name "*.yar" -o -name "*.yara" 2>/dev/null | head -10 | while read r; do
+        find /tmp /dev/shm /var/tmp -type f -size -10M 2>/dev/null | head -500 | xargs -r yara -r "$r" 2>/dev/null || true
       done
     fi
   else
@@ -1468,55 +1472,93 @@ echo "[SCAN_RESULT] yara=$YARA_MATCHES matches"
 # 7. UAC (optional, slower)
 # =============================================
 echo "[SCAN_STATUS] uac:running"
-timeout 300 bash -c 'if [ -d /opt/uac ] && [ -x /opt/uac/uac ]; then
+# Export SCAN_DIR for the subshell and run UAC with proper output capture
+export SCAN_DIR
+timeout 300 bash -c '
+if [ -d /opt/uac ] && [ -x /opt/uac/uac ]; then
   UAC_OUT="/tmp/uac_scan_$$"
   mkdir -p "$UAC_OUT"
-  cd /opt/uac && ./uac -p ir_triage "$UAC_OUT" 2>&1 | tail -10
+  cd /opt/uac
+  echo "Running UAC ir_triage profile..."
+  ./uac -p ir_triage "$UAC_OUT" 2>&1
+  echo ""
   if ls "$UAC_OUT"/uac-*.tar.gz 1>/dev/null 2>&1; then
-    UAC_TAR=$(ls "$UAC_OUT"/uac-*.tar.gz | head -1)
-    cp "$UAC_TAR" "$SCAN_DIR/" 2>/dev/null
-    echo "UAC tarball: $(basename "$UAC_TAR")"
+    UAC_TAR=$(ls -t "$UAC_OUT"/uac-*.tar.gz | head -1)
+    if [ -n "$SCAN_DIR" ] && [ -d "$SCAN_DIR" ]; then
+      cp "$UAC_TAR" "$SCAN_DIR/" 2>/dev/null && echo "UAC tarball copied to: $SCAN_DIR/$(basename "$UAC_TAR")"
+    else
+      echo "UAC tarball: $UAC_TAR (SCAN_DIR not set, not copied)"
+    fi
+    echo "UAC tarball size: $(ls -lh "$UAC_TAR" | awk "{print \$5}")"
+  else
+    echo "No UAC tarball found in $UAC_OUT"
+    ls -la "$UAC_OUT" 2>/dev/null
   fi
   rm -rf "$UAC_OUT"
-else echo "UAC not installed"; fi' > "$SCAN_DIR/uac_results.txt" 2>&1
+else
+  echo "UAC not installed at /opt/uac/uac"
+fi' > "$SCAN_DIR/uac_results.txt" 2>&1
 echo "[SCAN_STATUS] uac:done"
 
 ${memoryDump ? `
 # =============================================
-# 8. MEMORY DUMP + VOLATILITY
+# 8. MEMORY DUMP + VOLATILITY (using AVML)
 # =============================================
 echo "[SCAN_STATUS] memory:running"
-timeout 600 bash -c 'MEMDUMP="$SCAN_DIR/memory.lime"
+export SCAN_DIR
+timeout 600 bash -c '
+MEMDUMP="$SCAN_DIR/memory.lime"
+echo "Acquiring memory with AVML to: $MEMDUMP"
 if command -v avml >/dev/null 2>&1; then
-  avml "$MEMDUMP" 2>&1 && echo "Memory dump: $(ls -lh "$MEMDUMP" 2>/dev/null)"
+  avml "$MEMDUMP" 2>&1
+  if [ -f "$MEMDUMP" ]; then
+    echo "Memory dump acquired: $(ls -lh "$MEMDUMP")"
+  else
+    echo "ERROR: AVML ran but no dump created"
+  fi
 elif [ -x /opt/avml/avml ]; then
-  /opt/avml/avml "$MEMDUMP" 2>&1 && echo "Memory dump: $(ls -lh "$MEMDUMP" 2>/dev/null)"
+  /opt/avml/avml "$MEMDUMP" 2>&1
+  if [ -f "$MEMDUMP" ]; then
+    echo "Memory dump acquired: $(ls -lh "$MEMDUMP")"
+  fi
 else
-  echo "AVML not installed, skipping memory dump"
+  echo "ERROR: AVML not installed, cannot acquire memory"
 fi' > "$SCAN_DIR/memory_acquisition.txt" 2>&1
 echo "[SCAN_STATUS] memory:done"
 
 echo "[SCAN_STATUS] volatility:running"
-timeout 300 bash -c 'VOL3=""
+export SCAN_DIR
+timeout 300 bash -c '
+MEMDUMP="$SCAN_DIR/memory.lime"
+echo "Analyzing memory dump: $MEMDUMP"
+
+# Find Volatility3
+VOL3=""
 if command -v vol >/dev/null 2>&1; then VOL3="vol"
 elif command -v vol3 >/dev/null 2>&1; then VOL3="vol3"
-elif python3 -c "import volatility3.cli" 2>/dev/null; then VOL3="python3 -m volatility3.cli"
+elif [ -x /opt/volatility3-venv/bin/vol ]; then VOL3="/opt/volatility3-venv/bin/vol"
 fi
-MEMDUMP="$SCAN_DIR/memory.lime"
-if [ -n "$VOL3" ] && [ -f "$MEMDUMP" ]; then
-  echo "--- linux.pslist ---"
-  $VOL3 -f "$MEMDUMP" linux.pslist 2>&1 || true
-  echo ""
-  echo "--- linux.bash ---"
-  $VOL3 -f "$MEMDUMP" linux.bash 2>&1 || true
-  echo ""
-  echo "--- linux.check_syscall ---"
-  $VOL3 -f "$MEMDUMP" linux.check_syscall 2>&1 || true
+
+if [ -z "$VOL3" ]; then
+  echo "ERROR: Volatility3 not found"
+elif [ ! -f "$MEMDUMP" ]; then
+  echo "ERROR: Memory dump not found at $MEMDUMP"
 else
-  echo "Volatility3 not available or no memory dump"
-fi
-# Remove dump after analysis
-rm -f "$MEMDUMP"' > "$SCAN_DIR/volatility_results.txt" 2>&1
+  echo "Using Volatility3: $VOL3"
+  echo ""
+  echo "=== linux.pslist ==="
+  $VOL3 -f "$MEMDUMP" linux.pslist 2>&1 || echo "(pslist failed)"
+  echo ""
+  echo "=== linux.bash ==="
+  $VOL3 -f "$MEMDUMP" linux.bash 2>&1 || echo "(bash history failed)"
+  echo ""
+  echo "=== linux.check_syscall ==="
+  $VOL3 -f "$MEMDUMP" linux.check_syscall 2>&1 || echo "(syscall check failed)"
+  # Remove dump after analysis to save space
+  rm -f "$MEMDUMP"
+  echo ""
+  echo "Memory dump removed after analysis"
+fi' > "$SCAN_DIR/volatility_results.txt" 2>&1
 echo "[SCAN_STATUS] volatility:done"
 ` : `
 echo "[SCAN_STATUS] memory:skipped volatility:skipped"

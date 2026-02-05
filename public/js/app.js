@@ -3701,7 +3701,7 @@
           // Check if this was a skip_scans collection (Phase 1)
           if (options.skip_scans && !scanJobId) {
             // Display collection results immediately
-            outputEl.textContent = collectionOutput + '\n\n[SCAN] Starting security scans (Phase 2)...\n[SCAN] Scan results will be added to the collection tarball.';
+            outputEl.textContent = collectionOutput + '\n\n══ Phase 2: Security Scans ══\nRunning rkhunter, chkrootkit, ClamAV, AIDE, debsums, YARA, UAC...\nResults will be merged into the collection tarball.';
             showToast('Collection complete - starting security scans', 'success');
 
             // Kick off Phase 2 security scans
@@ -3713,7 +3713,7 @@
                 body: JSON.stringify({
                   targets,
                   memory_dump: options.memory_dump || false,
-                  timeout: 600
+                  timeout: 1200
                 })
               });
               if (scanResult.success && scanResult.job_id) {
@@ -3761,11 +3761,25 @@
             scanOutput = '\n\n══════════════════════════════════════════\n';
             scanOutput += '           SECURITY SCAN RESULTS          \n';
             scanOutput += '══════════════════════════════════════════\n';
-            if (scanSummary) {
+            if (scanSummary && Object.keys(scanSummary).length > 0) {
+              let hasResults = false;
               for (const [minion, summary] of Object.entries(scanSummary)) {
                 scanOutput += `\n── ${minion} ──\n`;
-                for (const [scanner, result] of Object.entries(summary)) {
-                  scanOutput += `  ${scanner}: ${result}\n`;
+                if (Object.keys(summary).length > 0) {
+                  hasResults = true;
+                  for (const [scanner, result] of Object.entries(summary)) {
+                    scanOutput += `  ${scanner}: ${result}\n`;
+                  }
+                } else {
+                  // Check if scan timed out by looking at raw results
+                  const rawResults = job.results || {};
+                  const rawOutput = rawResults[minion] || '';
+                  if (typeof rawOutput === 'string' && rawOutput.includes('Timed out')) {
+                    scanOutput += '  Scans timed out — partial results may be in the tarball.\n';
+                    scanOutput += '  Try increasing the timeout or running fewer scanners.\n';
+                  } else {
+                    scanOutput += '  No scan results parsed. Check /tmp/forensics/scanning/\n';
+                  }
                 }
               }
             } else {
@@ -3794,7 +3808,7 @@
               }
             }
           }
-          outputEl.textContent = collectionOutput + `\n\n[SCAN] Running security scans... ${scanProgress}`;
+          outputEl.textContent = collectionOutput + `\n\n══ Phase 2: Security Scans ══\nRunning... ${scanProgress}`;
           setTimeout(pollScan, 3000);
         } catch (err) {
           outputEl.textContent = collectionOutput + `\n\n[SCAN ERROR] ${err.message}`;
@@ -3821,28 +3835,65 @@
     for (const [minion, output] of Object.entries(results)) {
       out += `── ${minion} ──────────────────────────────\n`;
       if (output === false) {
-        out += '[ERROR] Salt returned false — the minion may be offline, the command timed out, or the Salt minion rejected the execution. Check minion connectivity with a ping.\n\n';
+        out += '[ERROR] Salt returned false — minion may be offline or timed out.\n\n';
       } else if (output === '' || output === null || output === undefined) {
         out += '[WARNING] Empty response from minion.\n\n';
       } else if (typeof output === 'string') {
-        // Look for FORENSICS_DONE marker to provide a summary
-        if (output.includes('FORENSICS_DONE:')) {
+        // Look for FORENSICS_DONE marker to provide a concise summary
+        if (output.includes('FORENSICS_DONE')) {
           const lines = output.split('\n');
+
+          // Extract tarball path
+          const tarballLine = lines.find(l => l.includes('[TARBALL]'));
+          const tarball = tarballLine ? tarballLine.replace('[TARBALL] ', '').trim() : '';
+
+          // Extract collection path
           const doneLine = lines.find(l => l.includes('FORENSICS_DONE:'));
           const path = doneLine ? doneLine.split('FORENSICS_DONE:')[1].trim() : '/tmp/forensics';
-          const completedSteps = lines.filter(l => l.includes('complete')).map(l => l.trim());
-          out += `Collection saved to: ${path}\n`;
-          if (completedSteps.length > 0) {
-            out += `Steps completed:\n${completedSteps.map(s => `  - ${s}`).join('\n')}\n`;
+
+          // Extract key status markers ([SCAN], [ANALYSIS], [CLEANUP])
+          const statusLines = lines.filter(l => /^\[(?:SCAN|ANALYSIS|CLEANUP)\]/.test(l.trim()));
+          const statusSet = new Set(statusLines.map(l => l.trim()));
+
+          // Extract completion markers not already in statusLines
+          const completedSteps = lines
+            .filter(l => /\bcomplete\b/i.test(l) && !/echo/i.test(l))
+            .map(l => l.trim())
+            .filter(l => !statusSet.has(l));
+
+          // Extract warnings/errors (skip grep/echo noise)
+          const issues = lines.filter(l =>
+            /error|fail|not installed|not found|not available/i.test(l) &&
+            !/grep|echo|timeout.*bash/i.test(l) &&
+            !l.includes('FORENSICS_DONE')
+          );
+
+          // Build concise output
+          if (tarball) out += `Tarball: ${tarball}\n`;
+          else out += `Collection: ${path}\n`;
+
+          if (statusLines.length > 0) {
+            out += statusLines.map(l => l.trim()).join('\n') + '\n';
           }
-          // Show any errors/warnings from the output
-          const issues = lines.filter(l => /error|fail|not installed|not found|not available/i.test(l) && !/grep|echo/i.test(l));
+
+          if (completedSteps.length > 0) {
+            out += completedSteps.join('\n') + '\n';
+          }
+
           if (issues.length > 0) {
-            out += `\nWarnings/Issues:\n${issues.slice(0, 20).map(s => `  ! ${s.trim()}`).join('\n')}\n`;
+            out += `\nWarnings (${issues.length}):\n${issues.slice(0, 10).map(s => `  ! ${s.trim()}`).join('\n')}\n`;
           }
           out += '\n';
         } else {
-          out += output + '\n\n';
+          // No FORENSICS_DONE marker — show raw but truncated
+          const lines = output.split('\n');
+          if (lines.length > 40) {
+            out += lines.slice(0, 15).join('\n') + '\n';
+            out += `  ... (${lines.length - 30} lines omitted) ...\n`;
+            out += lines.slice(-15).join('\n') + '\n\n';
+          } else {
+            out += output + '\n\n';
+          }
         }
       } else {
         out += JSON.stringify(output, null, 2) + '\n\n';

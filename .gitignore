@@ -36,6 +36,10 @@ playbooks/*.yaml
 # Uploaded files
 uploads/
 
+# Monitoring data (runtime)
+data/*.json
+!data/.gitkeep
+
 # Session data
 sessions/
 

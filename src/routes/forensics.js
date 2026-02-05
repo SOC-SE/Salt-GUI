@@ -683,18 +683,18 @@ router.get('/timeline/:target', async (req, res) => {
       }
 
       // Build audit editor map: path -> last editor info
+      // Format: tab-separated: path\tauid\tcomm
       const editorMap = {};
       for (const line of auditText.split('\n')) {
-        if (!line.trim()) continue;
-        // PATH line contains name=, SYSCALL contains uid/auid
-        const nameMatch = line.match(/name=(\S+)/);
-        const uidMatch = line.match(/auid=(\S+)/);
-        const commMatch = line.match(/comm=(\S+)/);
-        if (nameMatch) {
-          const p = nameMatch[1].replace(/"/g, '');
-          const editor = uidMatch ? uidMatch[1].replace(/"/g, '') : '';
-          const comm = commMatch ? commMatch[1].replace(/"/g, '') : '';
-          editorMap[p] = editor + (comm ? ' via ' + comm : '');
+        if (!line.trim() || line.startsWith('#')) continue;
+        const cols = line.split('\t');
+        if (cols.length >= 2) {
+          const p = cols[0].trim();
+          const auid = cols[1] ? cols[1].trim() : '';
+          const comm = cols[2] ? cols[2].trim() : '';
+          if (p && auid) {
+            editorMap[p] = auid + (comm && comm !== 'stat' ? ' via ' + comm : '');
+          }
         }
       }
 
@@ -1055,20 +1055,40 @@ timeout 60 bash -c 'find /var/www /srv/www /opt -type f \\( -name "*.php" -o -na
 echo "# NOTE: Files modified by the forensic scan itself are excluded from this timeline." > "$FDIR/files/file_timeline.txt"
 timeout 120 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "^[0-9.]+\\t[^ ]+\\t[0-9]+\\t[^ ]+\\t[^ ]+\\t(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/lib/rkhunter/|/var/lib/clamav/|/var/lib/aide/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -5000' >> "$FDIR/files/file_timeline.txt"
 timeout 30 bash -c 'lsattr -R /etc /usr/bin /usr/sbin /home 2>/dev/null' > "$FDIR/files/lsattr.txt"
-timeout 30 bash -c 'ausearch -ts recent -i 2>/dev/null | awk "/^type=PATH/{ path=\\$0 } /^type=SYSCALL/{ if(path) print path \\"\\t\\" \\$0; path=\\"\\" }" 2>/dev/null' > "$FDIR/files/audit_editors.txt"
+timeout 30 bash -c '
+if command -v ausearch >/dev/null 2>&1 && ausearch -ts today -i -sc open,openat,creat,rename,unlink,chmod,chown 2>/dev/null | head -1 | grep -q .; then
+  ausearch -ts today -i -sc open,openat,creat,rename,unlink,chmod,chown 2>/dev/null | awk "
+    /^type=PATH/  { p=\\"\\"; for(i=1;i<=NF;i++){ if(\\$i~/^name=/){gsub(/name=/,\\"\\",\\$i);gsub(/\\\"/,\\"\\",\\$i);p=\\$i} } }
+    /^type=SYSCALL/{ a=\\"\\"; c=\\"\\"; for(i=1;i<=NF;i++){ if(\\$i~/^auid=/){gsub(/auid=/,\\"\\",\\$i);gsub(/\\\"/,\\"\\",\\$i);a=\\$i} if(\\$i~/^comm=/){gsub(/comm=/,\\"\\",\\$i);gsub(/\\\"/,\\"\\",\\$i);c=\\$i} }; if(p && a) print p \\"\\t\\" a \\"\\t\\" c; p=\\"\\" }
+  " 2>/dev/null | sort -t"$(printf \\\"\\\\t\\\")" -k1,1 -u
+else
+  echo "# auditd data unavailable - using stat ownership as fallback"
+  find /etc /usr/bin /usr/sbin /home -type f -mmin -10080 -printf "%p\\t%u\\tstat\\n" 2>/dev/null | head -2000
+fi
+' > "$FDIR/files/audit_editors.txt"
 
 # =============================================
 # LOGS
 # =============================================
 ${opts.skip_logs ? '# Logs skipped by user option' : `
-cp /var/log/auth.log "$FDIR/logs/auth.log" 2>/dev/null || true
-cp /var/log/syslog "$FDIR/logs/syslog.log" 2>/dev/null || true
-cp /var/log/secure "$FDIR/logs/secure.log" 2>/dev/null || true
-cp /var/log/kern.log "$FDIR/logs/kern.log" 2>/dev/null || true
-cp /var/log/daemon.log "$FDIR/logs/daemon.log" 2>/dev/null || true
-cp /var/log/dpkg.log "$FDIR/logs/dpkg.log" 2>/dev/null || true
-cp /var/log/apt/history.log "$FDIR/logs/apt_history.log" 2>/dev/null || true
-cp /var/log/salt/minion "$FDIR/logs/salt_minion.log" 2>/dev/null || true
+# Comprehensive /var/log collection - preserves directory structure
+mkdir -p "$FDIR/logs/var_log"
+timeout 120 bash -c '
+SKIP_BINS="lastlog btmp wtmp faillog"
+find /var/log -type f 2>/dev/null | while read -r f; do
+  fname=$(basename "$f")
+  skip=0
+  for b in $SKIP_BINS; do [ "$fname" = "$b" ] && skip=1 && break; done
+  [ $skip -eq 1 ] && continue
+  case "$f" in /var/log/journal/*/*.journal*) continue;; esac
+  fsize=$(stat -c%s "$f" 2>/dev/null || echo 0)
+  [ "$fsize" -gt 52428800 ] && continue
+  relpath=$(echo "$f" | sed "s|^/var/log/||")
+  reldir=$(dirname "$relpath")
+  mkdir -p "'"$FDIR/logs/var_log"'/$reldir"
+  cp "$f" "'"$FDIR/logs/var_log"'/$relpath" 2>/dev/null
+done
+' || true
 timeout 10 bash -c 'journalctl --no-pager -n 200 2>/dev/null' > "$FDIR/logs/journal_recent.txt" || true
 `}
 timeout 15 bash -c 'find /var/log -maxdepth 2 -type f -empty -ls 2>/dev/null; echo ""; echo "=== Log sizes ==="; ls -laS /var/log/*.log /var/log/auth.log /var/log/syslog /var/log/secure 2>/dev/null; echo ""; echo "=== Log timestamps ==="; stat /var/log/auth.log /var/log/syslog /var/log/secure 2>/dev/null' > "$FDIR/logs/log_tampering_check.txt"

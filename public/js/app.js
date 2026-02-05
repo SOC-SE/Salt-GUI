@@ -402,6 +402,9 @@
       case 'reports':
         populateSecurityTargetSelect();
         break;
+      case 'monitoring':
+        loadMonitoringView();
+        break;
       case 'passwords':
         populateSingleDeviceSelects();
         renderInlineDeviceSelector('pwd');
@@ -2607,6 +2610,7 @@
   let logsData = [];
   let currentLogsTarget = null;
   let currentLogSources = [];
+  let logTailEventSource = null;
 
   async function loadLogSources() {
     const target = document.getElementById('logs-single-target').value;
@@ -2718,6 +2722,94 @@
     }).join('');
 
     contentEl.innerHTML = html;
+  }
+
+  function startLogTail() {
+    const target = document.getElementById('logs-single-target').value;
+    const source = document.getElementById('logs-source').value;
+    const contentEl = document.getElementById('logs-content');
+    const indicator = document.getElementById('logs-tail-indicator');
+    const tailBtn = document.getElementById('logs-tail-btn');
+
+    if (!target) { showToast('Select a device', 'warning'); return; }
+    if (!source || source.startsWith('event:')) { showToast('Select a file-based log source', 'warning'); return; }
+
+    // Stop any existing tail
+    stopLogTail();
+
+    contentEl.innerHTML = '<div class="loading">Starting live tail...</div>';
+    indicator.classList.remove('hidden');
+    tailBtn.textContent = 'Stop Tail';
+    tailBtn.classList.add('btn-danger');
+
+    const url = `${API_BASE}/api/logs/${encodeURIComponent(target)}/tail?path=${encodeURIComponent(source)}&lines=50`;
+    const es = new EventSource(url, { withCredentials: true });
+    logTailEventSource = es;
+    let firstBatch = true;
+
+    es.addEventListener('lines', (e) => {
+      const data = JSON.parse(e.data);
+      if (firstBatch) {
+        contentEl.innerHTML = '';
+        firstBatch = false;
+      }
+      for (const line of data.lines) {
+        const div = document.createElement('div');
+        div.className = 'log-line';
+        const lower = line.toLowerCase();
+        if (lower.includes('error') || lower.includes('fail') || lower.includes('crit')) {
+          div.classList.add('error');
+        } else if (lower.includes('warn')) {
+          div.classList.add('warning');
+        }
+        div.textContent = line;
+        contentEl.appendChild(div);
+      }
+      // Auto-scroll to bottom
+      contentEl.scrollTop = contentEl.scrollHeight;
+      // Update line count
+      const countEl = document.getElementById('logs-count');
+      if (countEl) countEl.textContent = `${contentEl.children.length} lines (live)`;
+    });
+
+    es.addEventListener('status', (e) => {
+      const data = JSON.parse(e.data);
+      if (data.status === 'timeout') {
+        stopLogTail();
+        showToast('Live tail timed out (30 min limit)', 'warning');
+      }
+    });
+
+    es.addEventListener('error', () => {
+      stopLogTail();
+      showToast('Live tail connection lost', 'error');
+    });
+
+    es.onerror = () => {
+      stopLogTail();
+    };
+  }
+
+  function stopLogTail() {
+    if (logTailEventSource) {
+      logTailEventSource.close();
+      logTailEventSource = null;
+    }
+    const indicator = document.getElementById('logs-tail-indicator');
+    const tailBtn = document.getElementById('logs-tail-btn');
+    if (indicator) indicator.classList.add('hidden');
+    if (tailBtn) {
+      tailBtn.textContent = 'Live Tail';
+      tailBtn.classList.remove('btn-danger');
+    }
+  }
+
+  function toggleLogTail() {
+    if (logTailEventSource) {
+      stopLogTail();
+    } else {
+      startLogTail();
+    }
   }
 
   // ============================================================
@@ -3010,13 +3102,65 @@
     showToast('Report downloaded', 'success');
   }
 
+  async function generateComprehensiveReport() {
+    const target = document.getElementById('report-comprehensive-target').value;
+    if (!target) { showToast('Select a target', 'warning'); return; }
+
+    const contentEl = document.getElementById('report-content');
+    contentEl.textContent = 'Generating comprehensive report...';
+
+    try {
+      const targets = target === '*' ? '*' : [target];
+      const result = await api('/api/reports/comprehensive', {
+        method: 'POST',
+        body: JSON.stringify({ targets })
+      });
+
+      const report = result.report;
+      let output = `=== Comprehensive System Report ===\nGenerated: ${report.generated}\n\n`;
+
+      for (const [minion, data] of Object.entries(report.minions)) {
+        output += `${'='.repeat(60)}\n  ${minion}\n${'='.repeat(60)}\n\n`;
+        output += `--- System Status ---\n${data.status}\n\n`;
+        output += `--- Users ---\n${data.users}\n\n`;
+        output += `--- Running Services ---\n${data.running_services}\n\n`;
+        output += `--- Top Processes ---\n${data.top_processes}\n\n`;
+        output += `--- Listening Ports ---\n${data.listening_ports}\n\n`;
+        output += `--- Log Files ---\n${data.log_files}\n\n`;
+      }
+
+      contentEl.textContent = output;
+
+      // Auto-download JSON
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `comprehensive-report-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      showToast('Comprehensive report generated and downloaded', 'success');
+    } catch (error) {
+      contentEl.textContent = `Error: ${error.message}`;
+      showToast('Report generation failed', 'error');
+    }
+  }
+
   function populateSecurityTargetSelect() {
-    const select = document.getElementById('report-security-target');
-    select.innerHTML = '<option value="">Select target...</option>' +
+    const opts = '<option value="">Select target...</option>' +
       '<option value="*">All Minions</option>' +
       state.devices.map(d =>
         `<option value="${escapeHtml(d.id)}">${escapeHtml(d.id)}</option>`
       ).join('');
+
+    const select = document.getElementById('report-security-target');
+    select.innerHTML = opts;
+
+    const compSelect = document.getElementById('report-comprehensive-target');
+    if (compSelect) compSelect.innerHTML = opts;
   }
 
   // ============================================================
@@ -3442,6 +3586,245 @@
         } catch (error) {
           outputEl.textContent = `Error: ${error.message}`;
           showToast('Failed to create user', 'error');
+        }
+      }
+    );
+  }
+
+  // ============================================================
+  // Monitoring (Scheduled Checks with Change Detection)
+  // ============================================================
+
+  async function loadMonitoringView() {
+    await Promise.all([loadBaselines(), loadSchedules(), loadChanges()]);
+  }
+
+  async function loadBaselines() {
+    const listEl = document.getElementById('mon-baselines-list');
+    try {
+      const result = await api('/api/monitoring/baselines');
+      const baselines = result.baselines || [];
+
+      if (baselines.length === 0) {
+        listEl.innerHTML = '<div class="loading">No baselines yet</div>';
+      } else {
+        let html = '<table class="results-table"><thead><tr><th>Name</th><th>Targets</th><th>Checks</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+        for (const b of baselines) {
+          html += `<tr>
+            <td>${escapeHtml(b.name)}</td>
+            <td>${escapeHtml(b.targets)}</td>
+            <td>${escapeHtml(b.checks.join(', '))}</td>
+            <td>${new Date(b.created).toLocaleString()}</td>
+            <td><button class="btn btn-small btn-danger" onclick="window._monDeleteBaseline('${escapeHtml(b.id)}')">Delete</button></td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        listEl.innerHTML = html;
+      }
+
+      // Populate baseline dropdowns
+      const opts = '<option value="">Select baseline...</option>' +
+        baselines.map(b => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.name)}</option>`).join('');
+      document.getElementById('mon-schedule-baseline').innerHTML = opts;
+      document.getElementById('mon-check-now-baseline').innerHTML = opts;
+    } catch (error) {
+      listEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  async function loadSchedules() {
+    const listEl = document.getElementById('mon-schedules-list');
+    try {
+      const result = await api('/api/monitoring/schedules');
+      const schedules = result.schedules || [];
+
+      if (schedules.length === 0) {
+        listEl.innerHTML = '<div class="loading">No schedules</div>';
+      } else {
+        let html = '<table class="results-table"><thead><tr><th>Name</th><th>Interval</th><th>Baseline</th><th>Last Run</th><th>Actions</th></tr></thead><tbody>';
+        for (const s of schedules) {
+          html += `<tr>
+            <td>${escapeHtml(s.name)}</td>
+            <td>${s.intervalMinutes} min</td>
+            <td>${escapeHtml(s.baselineId)}</td>
+            <td>${s.lastRun ? new Date(s.lastRun).toLocaleString() : 'Never'}</td>
+            <td><button class="btn btn-small btn-danger" onclick="window._monDeleteSchedule('${escapeHtml(s.id)}')">Delete</button></td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        listEl.innerHTML = html;
+      }
+    } catch (error) {
+      listEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  async function loadChanges() {
+    const feedEl = document.getElementById('mon-changes-feed');
+    try {
+      const result = await api('/api/monitoring/changes?limit=200');
+      const changes = result.changes || [];
+
+      if (changes.length === 0) {
+        feedEl.innerHTML = '<div class="loading">No changes detected</div>';
+      } else {
+        let html = '';
+        for (const c of changes) {
+          const sevClass = c.severity === 'high' ? 'finding-critical' : c.severity === 'medium' ? 'finding-high' : 'finding-medium';
+          const icon = c.changeType === 'added' ? '+' : '-';
+          html += `<div class="suspicious-item ${sevClass}" style="padding: 8px; margin-bottom: 4px;">
+            <div style="display: flex; justify-content: space-between;">
+              <strong>[${escapeHtml(c.severity.toUpperCase())}] ${escapeHtml(c.minion)} - ${escapeHtml(c.checkType)} (${icon}${escapeHtml(c.changeType)})</strong>
+              <span class="text-muted">${new Date(c.timestamp).toLocaleString()}</span>
+            </div>
+            <div style="margin-top: 4px; font-family: monospace; font-size: 0.85em; white-space: pre-wrap;">${escapeHtml(c.items.slice(0, 10).join('\n'))}${c.items.length > 10 ? '\n... and ' + (c.items.length - 10) + ' more' : ''}</div>
+          </div>`;
+        }
+        feedEl.innerHTML = html;
+      }
+    } catch (error) {
+      feedEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  async function createBaseline() {
+    const name = document.getElementById('mon-baseline-name').value.trim() || 'Baseline';
+    const targets = document.getElementById('mon-baseline-target').value.trim() || '*';
+    const checks = Array.from(document.querySelectorAll('.mon-check-type:checked')).map(cb => cb.value);
+
+    if (checks.length === 0) { showToast('Select at least one check type', 'warning'); return; }
+
+    try {
+      showToast('Creating baseline...', 'info');
+      await api('/api/monitoring/baseline', {
+        method: 'POST',
+        body: JSON.stringify({ name, targets, checks })
+      });
+      showToast('Baseline created', 'success');
+      await loadBaselines();
+    } catch (error) {
+      showToast(`Failed: ${error.message}`, 'error');
+    }
+  }
+
+  async function createSchedule() {
+    const baselineId = document.getElementById('mon-schedule-baseline').value;
+    const intervalMinutes = parseInt(document.getElementById('mon-schedule-interval').value) || 5;
+    const name = document.getElementById('mon-schedule-name').value.trim();
+
+    if (!baselineId) { showToast('Select a baseline', 'warning'); return; }
+
+    try {
+      await api('/api/monitoring/schedule', {
+        method: 'POST',
+        body: JSON.stringify({ baselineId, intervalMinutes, name: name || undefined })
+      });
+      showToast(`Schedule created: every ${intervalMinutes} min`, 'success');
+      await loadSchedules();
+    } catch (error) {
+      showToast(`Failed: ${error.message}`, 'error');
+    }
+  }
+
+  async function monitorCheckNow() {
+    const baselineId = document.getElementById('mon-check-now-baseline').value;
+    if (!baselineId) { showToast('Select a baseline', 'warning'); return; }
+
+    try {
+      showToast('Running check...', 'info');
+      const result = await api('/api/monitoring/check', {
+        method: 'POST',
+        body: JSON.stringify({ baselineId })
+      });
+      showToast(`Check complete: ${result.total} change(s) detected`, result.total > 0 ? 'warning' : 'success');
+      await loadChanges();
+    } catch (error) {
+      showToast(`Check failed: ${error.message}`, 'error');
+    }
+  }
+
+  // Expose delete handlers to onclick
+  window._monDeleteBaseline = async function(id) {
+    try {
+      await api(`/api/monitoring/baselines/${id}`, { method: 'DELETE' });
+      showToast('Baseline deleted', 'success');
+      await loadBaselines();
+    } catch (error) {
+      showToast(`Failed: ${error.message}`, 'error');
+    }
+  };
+
+  window._monDeleteSchedule = async function(id) {
+    try {
+      await api(`/api/monitoring/schedules/${id}`, { method: 'DELETE' });
+      showToast('Schedule deleted', 'success');
+      await loadSchedules();
+    } catch (error) {
+      showToast(`Failed: ${error.message}`, 'error');
+    }
+  };
+
+  // Bulk password rotation
+  async function bulkRotatePassword() {
+    const username = document.getElementById('bulk-rot-username').value.trim();
+    const password = document.getElementById('bulk-rot-password').value;
+    const confirm = document.getElementById('bulk-rot-confirm').value;
+    const targetSel = document.getElementById('bulk-rot-target').value;
+    const resultsEl = document.getElementById('bulk-rot-results');
+    const outputEl = document.getElementById('pwd-output');
+
+    if (!username) { showToast('Enter a username', 'warning'); return; }
+    if (!password) { showToast('Enter a password', 'warning'); return; }
+    if (password.length < 8) { showToast('Password must be at least 8 characters', 'warning'); return; }
+    if (password !== confirm) { showToast('Passwords do not match', 'error'); return; }
+
+    let targets;
+    if (targetSel === 'selected') {
+      const sel = getUserManagementTargets();
+      if (!sel) return;
+      targets = sel;
+    } else {
+      targets = '*';
+    }
+
+    const targetDesc = Array.isArray(targets) ? targets.join(', ') : targets;
+
+    showConfirmModal(
+      'Bulk Password Rotation',
+      `Change password for "${username}" on: ${targetDesc}?`,
+      async () => {
+        outputEl.textContent = 'Rotating password...';
+        resultsEl.classList.remove('hidden');
+        resultsEl.innerHTML = '<div class="loading">Rotating password across minions...</div>';
+
+        try {
+          const result = await api('/api/passwords/change', {
+            method: 'POST',
+            body: JSON.stringify({ targets, username, password })
+          });
+
+          let output = `Bulk password rotation: ${username}\n`;
+          output += `Total: ${result.summary.total}, Success: ${result.summary.success}, Failed: ${result.summary.failed}\n\n`;
+
+          let tableHtml = '<table class="results-table"><thead><tr><th>Minion</th><th>Status</th><th>Details</th></tr></thead><tbody>';
+          for (const [minion, data] of Object.entries(result.results)) {
+            const ok = data.success;
+            output += `-- ${minion} -- ${ok ? 'SUCCESS' : 'FAILED: ' + (data.error || 'Unknown')}\n`;
+            tableHtml += `<tr><td>${escapeHtml(minion)}</td><td class="${ok ? 'status-online' : 'status-offline'}">${ok ? 'OK' : 'FAIL'}</td><td>${escapeHtml(ok ? (data.message || 'Password changed') : (data.error || 'Unknown error'))}</td></tr>`;
+          }
+          tableHtml += '</tbody></table>';
+
+          resultsEl.innerHTML = tableHtml;
+          outputEl.textContent = output;
+          showToast(`Password rotated on ${result.summary.success}/${result.summary.total} devices`, result.summary.failed > 0 ? 'warning' : 'success');
+
+          // Clear password fields
+          document.getElementById('bulk-rot-password').value = '';
+          document.getElementById('bulk-rot-confirm').value = '';
+        } catch (error) {
+          outputEl.textContent = `Error: ${error.message}`;
+          resultsEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+          showToast('Bulk rotation failed', 'error');
         }
       }
     );
@@ -4634,9 +5017,10 @@
 
     // Logs
     document.getElementById('logs-single-target').addEventListener('change', loadLogSources);
-    document.getElementById('logs-load-btn').addEventListener('click', loadLogs);
-    document.getElementById('logs-refresh-btn').addEventListener('click', loadLogs);
+    document.getElementById('logs-load-btn').addEventListener('click', () => { stopLogTail(); loadLogs(); });
+    document.getElementById('logs-refresh-btn').addEventListener('click', () => { stopLogTail(); loadLogs(); });
     document.getElementById('logs-filter').addEventListener('input', renderLogsList);
+    document.getElementById('logs-tail-btn').addEventListener('click', toggleLogTail);
 
     // Suspicious
     document.getElementById('susp-scan-btn').addEventListener('click', () => scanSuspicious(false));
@@ -4659,6 +5043,7 @@
     document.getElementById('report-security-btn').addEventListener('click', generateSecurityReport);
     document.getElementById('report-copy-btn').addEventListener('click', copyReport);
     document.getElementById('report-download-btn').addEventListener('click', downloadReport);
+    document.getElementById('report-comprehensive-btn').addEventListener('click', generateComprehensiveReport);
 
     // Forensics
     document.querySelectorAll('.forensics-tab').forEach(tab => {
@@ -4761,6 +5146,15 @@
     document.getElementById('pwd-select-linux').addEventListener('click', () => { inlineSelectorSelectLinux('pwd'); updateShellSelectorVisibility(); });
     document.getElementById('pwd-select-windows').addEventListener('click', () => { inlineSelectorSelectWindows('pwd'); updateShellSelectorVisibility(); });
     document.getElementById('pwd-select-none').addEventListener('click', () => { inlineSelectorSelectNone('pwd'); updateShellSelectorVisibility(); });
+
+    // Monitoring
+    document.getElementById('mon-create-baseline-btn').addEventListener('click', createBaseline);
+    document.getElementById('mon-create-schedule-btn').addEventListener('click', createSchedule);
+    document.getElementById('mon-check-now-btn').addEventListener('click', monitorCheckNow);
+    document.getElementById('mon-refresh-changes-btn').addEventListener('click', loadChanges);
+
+    // Bulk password rotation
+    document.getElementById('bulk-rot-btn').addEventListener('click', bulkRotatePassword);
 
     // Keys
     document.getElementById('refresh-keys-btn').addEventListener('click', loadKeys);

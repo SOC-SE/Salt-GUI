@@ -882,7 +882,7 @@ find /tmp /var/tmp -type f -mtime -1 -ls > "$FDIR/files/recent_tmp.txt" 2>/dev/n
 
 # --- File Timeline & Editor Tracking ---
 echo "# Files modified in last 7 days" > "$FDIR/files/file_timeline.txt"
-timeout 60 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -2000' >> "$FDIR/files/file_timeline.txt"
+timeout 60 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/lib/rkhunter/|/var/lib/clamav/|/var/lib/aide/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -2000' >> "$FDIR/files/file_timeline.txt"
 
 if command -v ausearch >/dev/null 2>&1; then
   ausearch -ts today -i -sc open,openat,creat,rename,unlink,chmod,chown 2>/dev/null | awk '/^type=PATH/{p="";for(i=1;i<=NF;i++){if($i~/^name=/){gsub(/name=/,"",$i);gsub(/"/,"",$i);p=$i}}} /^type=SYSCALL/{a="";c="";for(i=1;i<=NF;i++){if($i~/^auid=/){gsub(/auid=/,"",$i);gsub(/"/,"",$i);a=$i}if($i~/^comm=/){gsub(/comm=/,"",$i);gsub(/"/,"",$i);c=$i}};if(p&&a)print p"\t"a"\t"c;p=""}' 2>/dev/null | sort -t'	' -k1,1 -u > "$FDIR/files/audit_editors.txt"
@@ -925,7 +925,7 @@ cp /var/log/secure "$FDIR/logs/secure.log" 2>/dev/null || true
 
 # --- File Timeline & Editor Tracking ---
 echo "# Files modified in last 7 days" > "$FDIR/files/file_timeline.txt"
-timeout 90 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -3000' >> "$FDIR/files/file_timeline.txt"
+timeout 90 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/lib/rkhunter/|/var/lib/clamav/|/var/lib/aide/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -3000' >> "$FDIR/files/file_timeline.txt"
 timeout 30 bash -c 'lsattr -R /etc /usr/bin /usr/sbin /home 2>/dev/null' > "$FDIR/files/lsattr.txt"
 
 if command -v ausearch >/dev/null 2>&1; then
@@ -1081,7 +1081,7 @@ timeout 15 bash -c '[ -f /.dockerenv ] && echo "FOUND: /.dockerenv"; grep -q doc
 timeout 10 bash -c 'docker ps -a 2>/dev/null; echo ""; docker images 2>/dev/null; echo ""; podman ps -a 2>/dev/null; podman images 2>/dev/null' > "$FDIR/files/docker_podman.txt"
 timeout 60 bash -c 'find /var/www /srv/www /opt -type f \\( -name "*.php" -o -name "*.jsp" -o -name "*.asp" -o -name "*.aspx" \\) -exec grep -lE "(eval|exec|system|passthru|shell_exec|popen|proc_open|base64_decode|assert)" {} \\; 2>/dev/null' > "$FDIR/files/webshell_scan.txt"
 echo "# NOTE: Files modified by the forensic scan itself are excluded from this timeline." > "$FDIR/files/file_timeline.txt"
-timeout 120 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "^[0-9.]+\\t[^ ]+\\t[0-9]+\\t[^ ]+\\t[^ ]+\\t(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/lib/rkhunter/|/var/lib/clamav/|/var/lib/aide/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -5000' >> "$FDIR/files/file_timeline.txt"
+timeout 120 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/lib/rkhunter/|/var/lib/clamav/|/var/lib/aide/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -5000' >> "$FDIR/files/file_timeline.txt"
 timeout 30 bash -c 'lsattr -R /etc /usr/bin /usr/sbin /home 2>/dev/null' > "$FDIR/files/lsattr.txt"
 # Generate audit_editors.txt with tab-separated: path\tauid\tcomm
 # Try ausearch first, fall back to stat ownership

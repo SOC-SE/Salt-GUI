@@ -706,6 +706,7 @@ router.get('/timeline/:target', async (req, res) => {
         if (cols.length < 6) continue;
         const epoch = parseFloat(cols[0]) || 0;
         const p = cols[5];
+        if (p && (p.startsWith('/tmp/forensics/') || p.startsWith('/tmp/uac_scan_') || p.startsWith('/opt/uac/') || p.startsWith('/var/cache/salt/') || p.startsWith('/tmp/salt-'))) continue;
         const rawFlags = flagsMap[p] || '';
         // Translate lsattr flags to readable labels
         let flags = '';
@@ -728,7 +729,7 @@ router.get('/timeline/:target', async (req, res) => {
       res.json({ success: true, entries: entries.slice(0, maxEntries), source: 'tarball', note: 'Files modified by the forensic scan itself are excluded.' });
     } else {
       // Fallback: live find command
-      const script = `find /tmp/forensics/ /var/log/ /etc/ -maxdepth 2 -type f -printf '%T@ %m %u %s %p\\n' 2>/dev/null | sort -rn | head -${maxEntries}`;
+      const script = `find /var/log/ /etc/ -maxdepth 2 -type f -printf '%T@ %m %u %s %p\\n' 2>/dev/null | sort -rn | head -${maxEntries}`;
       const result = await saltClient.cmd(target, script, { shell: '/bin/bash', timeout: 60 });
 
       const entries = [];
@@ -737,8 +738,10 @@ router.get('/timeline/:target', async (req, res) => {
           for (const line of output.split('\n').filter(l => l.trim())) {
             const parts = line.split(' ');
             const mtime = parseFloat(parts[0]) || 0;
+            const filePath = parts.slice(4).join(' ');
+            if (filePath.startsWith('/tmp/forensics/') || filePath.startsWith('/tmp/uac_scan_') || filePath.startsWith('/opt/uac/') || filePath.startsWith('/var/cache/salt/') || filePath.startsWith('/tmp/salt-')) continue;
             entries.push({
-              path: parts.slice(4).join(' '),
+              path: filePath,
               time: new Date(mtime * 1000).toISOString(),
               perms: parts[1] || '',
               size: parseInt(parts[3]) || 0,
@@ -877,6 +880,18 @@ ps auxf > "$FDIR/processes/ps_full.txt" 2>/dev/null
 # --- Files ---
 find /tmp /var/tmp -type f -mtime -1 -ls > "$FDIR/files/recent_tmp.txt" 2>/dev/null
 
+# --- File Timeline & Editor Tracking ---
+echo "# Files modified in last 7 days" > "$FDIR/files/file_timeline.txt"
+timeout 60 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -2000' >> "$FDIR/files/file_timeline.txt"
+
+if command -v ausearch >/dev/null 2>&1; then
+  ausearch -ts today -i -sc open,openat,creat,rename,unlink,chmod,chown 2>/dev/null | awk '/^type=PATH/{p="";for(i=1;i<=NF;i++){if($i~/^name=/){gsub(/name=/,"",$i);gsub(/"/,"",$i);p=$i}}} /^type=SYSCALL/{a="";c="";for(i=1;i<=NF;i++){if($i~/^auid=/){gsub(/auid=/,"",$i);gsub(/"/,"",$i);a=$i}if($i~/^comm=/){gsub(/comm=/,"",$i);gsub(/"/,"",$i);c=$i}};if(p&&a)print p"\t"a"\t"c;p=""}' 2>/dev/null | sort -t'	' -k1,1 -u > "$FDIR/files/audit_editors.txt"
+fi
+if [ ! -s "$FDIR/files/audit_editors.txt" ]; then
+  echo "# stat ownership fallback" > "$FDIR/files/audit_editors.txt"
+  find /etc /usr/bin /usr/sbin /home -type f -mmin -10080 -printf "%p\t%u\tstat\n" 2>/dev/null | head -2000 >> "$FDIR/files/audit_editors.txt"
+fi
+
 echo "Standard collection complete"
 `;
 
@@ -907,6 +922,19 @@ cat /root/.bash_history > "$FDIR/users/root_history.txt" 2>/dev/null
 cp /var/log/auth.log "$FDIR/logs/auth.log" 2>/dev/null || true
 cp /var/log/syslog "$FDIR/logs/syslog.log" 2>/dev/null || true
 cp /var/log/secure "$FDIR/logs/secure.log" 2>/dev/null || true
+
+# --- File Timeline & Editor Tracking ---
+echo "# Files modified in last 7 days" > "$FDIR/files/file_timeline.txt"
+timeout 90 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -3000' >> "$FDIR/files/file_timeline.txt"
+timeout 30 bash -c 'lsattr -R /etc /usr/bin /usr/sbin /home 2>/dev/null' > "$FDIR/files/lsattr.txt"
+
+if command -v ausearch >/dev/null 2>&1; then
+  ausearch -ts today -i -sc open,openat,creat,rename,unlink,chmod,chown 2>/dev/null | awk '/^type=PATH/{p="";for(i=1;i<=NF;i++){if($i~/^name=/){gsub(/name=/,"",$i);gsub(/"/,"",$i);p=$i}}} /^type=SYSCALL/{a="";c="";for(i=1;i<=NF;i++){if($i~/^auid=/){gsub(/auid=/,"",$i);gsub(/"/,"",$i);a=$i}if($i~/^comm=/){gsub(/comm=/,"",$i);gsub(/"/,"",$i);c=$i}};if(p&&a)print p"\t"a"\t"c;p=""}' 2>/dev/null | sort -t'	' -k1,1 -u > "$FDIR/files/audit_editors.txt"
+fi
+if [ ! -s "$FDIR/files/audit_editors.txt" ]; then
+  echo "# stat ownership fallback" > "$FDIR/files/audit_editors.txt"
+  find /etc /usr/bin /usr/sbin /home -type f -mmin -10080 -printf "%p\t%u\tstat\n" 2>/dev/null | head -2000 >> "$FDIR/files/audit_editors.txt"
+fi
 
 echo "Advanced collection complete"
 `;
@@ -1055,17 +1083,17 @@ timeout 60 bash -c 'find /var/www /srv/www /opt -type f \\( -name "*.php" -o -na
 echo "# NOTE: Files modified by the forensic scan itself are excluded from this timeline." > "$FDIR/files/file_timeline.txt"
 timeout 120 bash -c 'find / -xdev -type f -mmin -10080 -printf "%T@\\t%M\\t%s\\t%u\\t%g\\t%p\\n" 2>/dev/null | grep -vE "^[0-9.]+\\t[^ ]+\\t[0-9]+\\t[^ ]+\\t[^ ]+\\t(/tmp/forensics/|/tmp/uac_|/opt/uac/|/var/lib/rkhunter/|/var/lib/clamav/|/var/lib/aide/|/var/cache/salt/|/tmp/salt-|/var/log/salt/)" | sort -rn | head -5000' >> "$FDIR/files/file_timeline.txt"
 timeout 30 bash -c 'lsattr -R /etc /usr/bin /usr/sbin /home 2>/dev/null' > "$FDIR/files/lsattr.txt"
-timeout 30 bash -c '
-if command -v ausearch >/dev/null 2>&1 && ausearch -ts today -i -sc open,openat,creat,rename,unlink,chmod,chown 2>/dev/null | head -1 | grep -q .; then
-  ausearch -ts today -i -sc open,openat,creat,rename,unlink,chmod,chown 2>/dev/null | awk "
-    /^type=PATH/  { p=\\"\\"; for(i=1;i<=NF;i++){ if(\\$i~/^name=/){gsub(/name=/,\\"\\",\\$i);gsub(/\\\"/,\\"\\",\\$i);p=\\$i} } }
-    /^type=SYSCALL/{ a=\\"\\"; c=\\"\\"; for(i=1;i<=NF;i++){ if(\\$i~/^auid=/){gsub(/auid=/,\\"\\",\\$i);gsub(/\\\"/,\\"\\",\\$i);a=\\$i} if(\\$i~/^comm=/){gsub(/comm=/,\\"\\",\\$i);gsub(/\\\"/,\\"\\",\\$i);c=\\$i} }; if(p && a) print p \\"\\t\\" a \\"\\t\\" c; p=\\"\\" }
-  " 2>/dev/null | sort -t"$(printf \\\"\\\\t\\\")" -k1,1 -u
-else
-  echo "# auditd data unavailable - using stat ownership as fallback"
-  find /etc /usr/bin /usr/sbin /home -type f -mmin -10080 -printf "%p\\t%u\\tstat\\n" 2>/dev/null | head -2000
+# Generate audit_editors.txt with tab-separated: path\tauid\tcomm
+# Try ausearch first, fall back to stat ownership
+if command -v ausearch >/dev/null 2>&1; then
+  ausearch -ts today -i -sc open,openat,creat,rename,unlink,chmod,chown 2>/dev/null | \
+    awk '/^type=PATH/{p="";for(i=1;i<=NF;i++){if($i~/^name=/){gsub(/name=/,"",$i);gsub(/"/,"",$i);p=$i}}} /^type=SYSCALL/{a="";c="";for(i=1;i<=NF;i++){if($i~/^auid=/){gsub(/auid=/,"",$i);gsub(/"/,"",$i);a=$i}if($i~/^comm=/){gsub(/comm=/,"",$i);gsub(/"/,"",$i);c=$i}};if(p&&a)print p"\t"a"\t"c;p=""}' \
+    2>/dev/null | sort -t'	' -k1,1 -u > "$FDIR/files/audit_editors.txt"
 fi
-' > "$FDIR/files/audit_editors.txt"
+if [ ! -s "$FDIR/files/audit_editors.txt" ]; then
+  echo "# auditd data unavailable - using stat ownership as fallback" > "$FDIR/files/audit_editors.txt"
+  find /etc /usr/bin /usr/sbin /home -type f -mmin -10080 -printf "%p\t%u\tstat\n" 2>/dev/null | head -2000 >> "$FDIR/files/audit_editors.txt"
+fi
 
 # =============================================
 # LOGS

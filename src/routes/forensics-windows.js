@@ -229,8 +229,9 @@ router.get('/collections', async (req, res) => {
       fun: 'cmd.run',
       tgt: target,
       tgt_type,
-      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 },
-      saltTimeout: 30
+      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 60 },
+      saltTimeout: 60,
+      timeout: 90000
     });
     res.json({ success: true, collections: result });
   } catch (error) {
@@ -299,8 +300,9 @@ router.post('/browse', async (req, res) => {
       fun: 'cmd.run',
       tgt: target,
       tgt_type: 'glob',
-      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 },
-      saltTimeout: 30
+      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 120 },
+      saltTimeout: 120,
+      timeout: 150000
     });
     const files = {};
     for (const [minion, output] of Object.entries(result)) {
@@ -349,8 +351,9 @@ router.post('/browse/file', async (req, res) => {
       fun: 'cmd.run',
       tgt: target,
       tgt_type: 'glob',
-      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 },
-      saltTimeout: 30
+      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 120 },
+      saltTimeout: 120,
+      timeout: 150000
     });
     res.json({ success: true, content: result });
   } catch (error) {

@@ -140,7 +140,8 @@ class SaltAPIClient {
       tgt_type = 'glob',
       arg = [],
       kwarg = {},
-      timeout = this.defaultTimeout
+      timeout = this.defaultTimeout,
+      saltTimeout  // Salt-side timeout in seconds (how long master waits for minion response)
     } = options;
 
     // Include credentials directly in payload instead of using token
@@ -154,7 +155,9 @@ class SaltAPIClient {
       ...(tgt !== undefined && { tgt_type }),
       ...(arg.length > 0 && { arg }),
       // Wheel and runner clients expect kwargs as top-level fields, not nested in kwarg
-      ...(Object.keys(kwarg).length > 0 && (client === 'wheel' || client === 'runner' ? kwarg : { kwarg }))
+      ...(Object.keys(kwarg).length > 0 && (client === 'wheel' || client === 'runner' ? kwarg : { kwarg })),
+      // Salt-side timeout: how long the master waits for minion responses (in seconds)
+      ...(saltTimeout !== undefined && { timeout: saltTimeout })
     };
 
     logger.debug(`Salt API call: ${client}.${fun}`, { tgt, tgt_type });

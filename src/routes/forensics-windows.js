@@ -58,36 +58,65 @@ const SALT_FILE_ROOTS = '/srv/salt';
 
 /**
  * Run a PowerShell script on Windows targets reliably.
- * Writes the script to Salt's file_roots as a temp .ps1 file,
- * uses cmd.script with salt:// source (Salt handles file transfer natively),
- * then cleans up. This avoids the unreliable stdin-piping approach that
- * fails with large PowerShell scripts on Windows.
+ * Uses a two-step approach: cp.get_file to push the script to each minion,
+ * then cmd.run to execute it. This avoids Salt API issues with cmd.script
+ * returning false due to fileserver caching inconsistencies.
  */
 async function runWinPsScript(targets, scriptContent, { timeout = 180 } = {}) {
   const scriptName = `_wintmp_${crypto.randomBytes(8).toString('hex')}.ps1`;
   const scriptPath = path.join(SALT_FILE_ROOTS, scriptName);
+  const remoteScriptPath = `C:\\Windows\\Temp\\${scriptName}`;
   try {
     fs.writeFileSync(scriptPath, scriptContent, 'utf8');
+    // Force Salt Master to rescan file_roots so cp.get_file can find the new file
+    try {
+      await saltClient.run({ client: 'runner', fun: 'fileserver.update' });
+    } catch (fsErr) {
+      logger.warn('fileserver.update failed:', fsErr.message);
+    }
     const tgt_type = Array.isArray(targets) ? 'list' : 'glob';
-    const result = await saltClient.run({
+    // Step 1: Push script to minion(s) via cp.get_file
+    const cpResult = await saltClient.run({
       client: 'local',
-      fun: 'cmd.script',
+      fun: 'cp.get_file',
       tgt: targets,
       tgt_type,
-      arg: [`salt://${scriptName}`],
-      kwarg: { shell: 'powershell', timeout },
-      timeout: (timeout + 30) * 1000
+      arg: [`salt://${scriptName}`, remoteScriptPath],
+      saltTimeout: 60,
+      timeout: 90000
     });
-    // cmd.script returns {retcode, stdout, stderr} - extract stdout
-    const output = {};
-    for (const [minion, val] of Object.entries(result)) {
-      if (val && typeof val === 'object' && 'stdout' in val) {
-        output[minion] = val.stdout;
-      } else {
-        output[minion] = val;
+    // Verify file was pushed to all targets
+    for (const [minion, val] of Object.entries(cpResult)) {
+      if (!val || val === false) {
+        logger.warn(`runWinPsScript: cp.get_file failed for ${minion}: ${JSON.stringify(val)}`);
       }
     }
-    return output;
+    // Step 2: Execute the script on minion(s) via cmd.run
+    const result = await saltClient.run({
+      client: 'local',
+      fun: 'cmd.run',
+      tgt: targets,
+      tgt_type,
+      arg: [`powershell -ExecutionPolicy Bypass -File "${remoteScriptPath}"`],
+      kwarg: { timeout },
+      saltTimeout: timeout + 10,
+      timeout: (timeout + 30) * 1000
+    });
+    logger.debug(`runWinPsScript: result preview: ${JSON.stringify(result).slice(0, 200)}`);
+    // Step 3: Clean up remote script (best effort)
+    try {
+      await saltClient.run({
+        client: 'local',
+        fun: 'cmd.run',
+        tgt: targets,
+        tgt_type,
+        arg: [`del "${remoteScriptPath}"`],
+        kwarg: { timeout: 10 },
+        saltTimeout: 15,
+        timeout: 20000
+      });
+    } catch {}
+    return result;
   } finally {
     try { fs.unlinkSync(scriptPath); } catch {}
   }
@@ -200,7 +229,8 @@ router.get('/collections', async (req, res) => {
       fun: 'cmd.run',
       tgt: target,
       tgt_type,
-      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 }
+      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 },
+      saltTimeout: 30
     });
     res.json({ success: true, collections: result });
   } catch (error) {
@@ -225,7 +255,9 @@ router.post('/retrieve', auditAction('forensics_windows.retrieve'), async (req, 
       client: 'local',
       tgt: target,
       fun: 'cp.push',
-      arg: [artifact_path]
+      arg: [artifact_path],
+      saltTimeout: 120,
+      timeout: 150000
     });
     res.json({ success: true, result, local: true });
   } catch (error) {
@@ -267,7 +299,8 @@ router.post('/browse', async (req, res) => {
       fun: 'cmd.run',
       tgt: target,
       tgt_type: 'glob',
-      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 }
+      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 },
+      saltTimeout: 30
     });
     const files = {};
     for (const [minion, output] of Object.entries(result)) {
@@ -316,9 +349,275 @@ router.post('/browse/file', async (req, res) => {
       fun: 'cmd.run',
       tgt: target,
       tgt_type: 'glob',
-      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 }
+      kwarg: { cmd: psCmd, shell: 'powershell', timeout: 30 },
+      saltTimeout: 30
     });
     res.json({ success: true, content: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/forensics-windows/timeline
+ * Extract file timeline data from a Windows forensics ZIP artifact.
+ * Tries timeline/file_timeline.csv first, falls back to system/recent_files_*.csv,
+ * then to a live PowerShell query if no collection data is available.
+ */
+router.post('/timeline', async (req, res) => {
+  const { target, zip_path, limit = 100 } = req.body;
+  if (!target) {
+    return res.status(400).json({ success: false, error: 'Target required' });
+  }
+
+  const maxEntries = Math.min(Math.max(parseInt(limit) || 100, 10), 1000);
+
+  // Helper: parse CSV text (handles quoted fields with commas)
+  function parseCSVLine(line) {
+    const fields = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      if (inQuotes) {
+        if (line[i] === '"' && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else if (line[i] === '"') {
+          inQuotes = false;
+        } else {
+          current += line[i];
+        }
+      } else if (line[i] === '"') {
+        inQuotes = true;
+      } else if (line[i] === ',') {
+        fields.push(current);
+        current = '';
+      } else {
+        current += line[i];
+      }
+    }
+    fields.push(current);
+    return fields;
+  }
+
+  function parseCSV(text) {
+    const lines = text.split('\n').filter(l => l.trim());
+    if (lines.length < 2) return [];
+    const headers = parseCSVLine(lines[0]).map(h => h.trim().replace(/^\uFEFF/, ''));
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const fields = parseCSVLine(lines[i]);
+      const row = {};
+      headers.forEach((h, idx) => { row[h] = (fields[idx] || '').trim(); });
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  function normalizeEntries(rows, source) {
+    return rows.map(r => {
+      if (source === 'file_timeline') {
+        // Columns: Timestamp, Size, Owner, FullName
+        return {
+          time: r.Timestamp || r.timestamp || '',
+          path: r.FullName || r.fullname || r.Path || '',
+          size: r.Size || r.size || '',
+          owner: r.Owner || r.owner || ''
+        };
+      } else {
+        // recent_files CSV: FullName, LastWriteTime, Length, Extension
+        return {
+          time: r.LastWriteTime || r.lastwritetime || '',
+          path: r.FullName || r.fullname || r.Name || '',
+          size: r.Length || r.length || '',
+          owner: ''
+        };
+      }
+    }).filter(e => e.path);
+  }
+
+  // Try reading from ZIP collection
+  if (zip_path && zip_path.match(/^C:\\Windows\\Temp\\forensics\\[a-zA-Z0-9_.-]+\.zip$/i)) {
+    try {
+      const localPath = getLocalWinArtifactPath(target, zip_path);
+
+      // Preferred: timeline/file_timeline.csv (comprehensive level)
+      const timelineFiles = ['timeline/file_timeline.csv'];
+      // Fallback: system/recent_files_*.csv (standard+)
+      const recentPattern = /^system\/recent_files[^/]*\.csv$/i;
+
+      if (localPath) {
+        // --- Local ZIP reading via python3 ---
+        // First try to find which timeline files exist
+        const { stdout: listing } = await execLocal('python3', ['-c',
+          'import zipfile,sys\nz=zipfile.ZipFile(sys.argv[1])\nfor n in z.namelist():print(n)\nz.close()',
+          localPath]);
+        const allFiles = listing.split('\n').filter(f => f.trim());
+
+        let csvContent = null;
+        let source = '';
+
+        // Try file_timeline.csv
+        for (const tf of timelineFiles) {
+          if (allFiles.some(f => f.replace(/\\/g, '/').toLowerCase() === tf.toLowerCase())) {
+            const match = allFiles.find(f => f.replace(/\\/g, '/').toLowerCase() === tf.toLowerCase());
+            const { stdout } = await execLocal('python3', ['-c',
+              'import zipfile,sys\nz=zipfile.ZipFile(sys.argv[1])\nd=z.read(sys.argv[2]).decode("utf-8",errors="replace")\nprint(d,end="")\nz.close()',
+              localPath, match]);
+            csvContent = stdout;
+            source = 'file_timeline';
+            break;
+          }
+        }
+
+        // Fallback to all recent_files CSVs (merge them)
+        if (!csvContent) {
+          const recentFiles = allFiles.filter(f => recentPattern.test(f.replace(/\\/g, '/')));
+          if (recentFiles.length > 0) {
+            let allRows = [];
+            for (const rf of recentFiles) {
+              const { stdout } = await execLocal('python3', ['-c',
+                'import zipfile,sys\nz=zipfile.ZipFile(sys.argv[1])\nd=z.read(sys.argv[2]).decode("utf-8",errors="replace")\nprint(d,end="")\nz.close()',
+                localPath, rf]);
+              allRows = allRows.concat(parseCSV(stdout));
+            }
+            let entries = normalizeEntries(allRows, 'recent_files');
+            entries.sort((a, b) => {
+              const ta = new Date(a.time).getTime() || 0;
+              const tb = new Date(b.time).getTime() || 0;
+              return tb - ta;
+            });
+            entries = entries.slice(0, maxEntries);
+            return res.json({ success: true, entries, source: 'collection' });
+          }
+        }
+
+        if (csvContent) {
+          const rows = parseCSV(csvContent);
+          let entries = normalizeEntries(rows, source);
+          // Sort by time descending
+          entries.sort((a, b) => {
+            const ta = new Date(a.time).getTime() || 0;
+            const tb = new Date(b.time).getTime() || 0;
+            return tb - ta;
+          });
+          entries = entries.slice(0, maxEntries);
+          return res.json({ success: true, entries, source: 'collection' });
+        }
+      } else {
+        // --- Remote ZIP reading via PowerShell ---
+        const safeZip = zip_path.replace(/'/g, "''");
+
+        // List entries to find timeline files
+        const listCmd = `Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead('${safeZip}'); $z.Entries | ForEach-Object { $_.FullName }; $z.Dispose()`;
+        const listResult = await saltClient.run({
+          client: 'local', fun: 'cmd.run', tgt: target, tgt_type: 'glob',
+          kwarg: { cmd: listCmd, shell: 'powershell', timeout: 30 },
+          saltTimeout: 30
+        });
+        const remoteFiles = (typeof listResult[target] === 'string')
+          ? listResult[target].split('\n').map(f => f.trim()).filter(f => f)
+          : [];
+
+        let targetFile = null;
+        let source = '';
+
+        for (const tf of timelineFiles) {
+          const match = remoteFiles.find(f => f.replace(/\\/g, '/').toLowerCase() === tf.toLowerCase());
+          if (match) { targetFile = match; source = 'file_timeline'; break; }
+        }
+        if (!targetFile) {
+          // Fallback: read all recent_files CSVs
+          const recentMatches = remoteFiles.filter(f => recentPattern.test(f.replace(/\\/g, '/')));
+          if (recentMatches.length > 0) {
+            let allRows = [];
+            for (const rf of recentMatches) {
+              const safeFile = rf.replace(/'/g, "''");
+              const readCmd = `Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead('${safeZip}'); $e=$z.Entries | Where-Object { $_.FullName -eq '${safeFile}' } | Select-Object -First 1; if($e){ $r=New-Object System.IO.StreamReader($e.Open()); $r.ReadToEnd(); $r.Close() }; $z.Dispose()`;
+              const readResult = await saltClient.run({
+                client: 'local', fun: 'cmd.run', tgt: target, tgt_type: 'glob',
+                kwarg: { cmd: readCmd, shell: 'powershell', timeout: 30 },
+                saltTimeout: 30
+              });
+              const csv = readResult[target];
+              if (typeof csv === 'string' && csv.trim()) {
+                allRows = allRows.concat(parseCSV(csv));
+              }
+            }
+            if (allRows.length > 0) {
+              let entries = normalizeEntries(allRows, 'recent_files');
+              entries.sort((a, b) => {
+                const ta = new Date(a.time).getTime() || 0;
+                const tb = new Date(b.time).getTime() || 0;
+                return tb - ta;
+              });
+              entries = entries.slice(0, maxEntries);
+              return res.json({ success: true, entries, source: 'collection' });
+            }
+          }
+        }
+
+        if (targetFile) {
+          const safeFile = targetFile.replace(/'/g, "''");
+          const readCmd = `Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead('${safeZip}'); $e=$z.Entries | Where-Object { $_.FullName -eq '${safeFile}' } | Select-Object -First 1; if($e){ $r=New-Object System.IO.StreamReader($e.Open()); $r.ReadToEnd(); $r.Close() }; $z.Dispose()`;
+          const readResult = await saltClient.run({
+            client: 'local', fun: 'cmd.run', tgt: target, tgt_type: 'glob',
+            kwarg: { cmd: readCmd, shell: 'powershell', timeout: 30 },
+            saltTimeout: 30
+          });
+          const csvContent = readResult[target];
+          if (typeof csvContent === 'string' && csvContent.trim()) {
+            const rows = parseCSV(csvContent);
+            let entries = normalizeEntries(rows, source);
+            entries.sort((a, b) => {
+              const ta = new Date(a.time).getTime() || 0;
+              const tb = new Date(b.time).getTime() || 0;
+              return tb - ta;
+            });
+            entries = entries.slice(0, maxEntries);
+            return res.json({ success: true, entries, source: 'collection' });
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(`Win forensics timeline ZIP read failed, trying live: ${err.message}`);
+    }
+  }
+
+  // Live fallback: query recent files directly via PowerShell
+  try {
+    const psLive = `$dirs = @("$env:SystemRoot\\System32","$env:SystemRoot\\Temp","$env:TEMP","$env:ProgramData","$env:USERPROFILE");
+$cutoff = (Get-Date).AddDays(-7);
+$results = @();
+foreach($d in $dirs){
+  if(Test-Path $d){
+    Get-ChildItem -Path $d -Recurse -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -gt $cutoff } |
+      Select-Object FullName, LastWriteTime, Length, @{N='Owner';E={try{(Get-Acl $_.FullName).Owner}catch{''}}} |
+      ForEach-Object { $results += $_ }
+  }
+}
+$results | Sort-Object LastWriteTime -Descending | Select-Object -First ${maxEntries} | ConvertTo-Csv -NoTypeInformation`;
+
+    const result = await saltClient.run({
+      client: 'local', fun: 'cmd.run', tgt: target, tgt_type: 'glob',
+      kwarg: { cmd: psLive, shell: 'powershell', timeout: 60 },
+      saltTimeout: 60
+    });
+
+    const output = result[target];
+    if (typeof output === 'string' && output.trim()) {
+      const rows = parseCSV(output);
+      const entries = rows.map(r => ({
+        time: r.LastWriteTime || '',
+        path: r.FullName || '',
+        size: r.Length || '',
+        owner: r.Owner || ''
+      })).filter(e => e.path).slice(0, maxEntries);
+      return res.json({ success: true, entries, source: 'live' });
+    }
+
+    res.json({ success: true, entries: [], source: 'none' });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

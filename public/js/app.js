@@ -5353,8 +5353,10 @@
     document.getElementById('wfr-browse-content').classList.remove('hidden');
     document.getElementById('wfr-browse-label').textContent = `${minion} / ${zipPath.split('\\').pop()}`;
 
-    // Hide findings until analysis is run
+    // Hide findings until analysis is run; show timeline section
     document.getElementById('wfr-findings-section').classList.add('hidden');
+    document.getElementById('wfr-timeline-section').classList.remove('hidden');
+    document.getElementById('wfr-timeline-list').innerHTML = '<div class="loading">Click Load to view timeline</div>';
 
     const filetreeEl = document.getElementById('wfr-filetree');
     const contentEl = document.getElementById('wfr-file-content');
@@ -5521,6 +5523,50 @@
     const filtered = severity ? wfrBrowseState.allFindings.filter(f => (f.severity || '').toLowerCase() === severity) : wfrBrowseState.allFindings;
     wfrBrowseState.findings = filtered;
     renderForensicsFindings(filtered, document.getElementById('wfr-findings-list'), document.getElementById('wfr-severity-summary'));
+  }
+
+  async function loadWinForensicsTimeline() {
+    const target = wfrBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+    const limit = parseInt(document.getElementById('wfr-timeline-limit').value) || 100;
+    document.getElementById('wfr-timeline-section').classList.remove('hidden');
+    const listEl = document.getElementById('wfr-timeline-list');
+    listEl.innerHTML = '<div class="loading">Loading timeline...</div>';
+
+    try {
+      const result = await api('/api/forensics-windows/timeline', {
+        method: 'POST',
+        body: JSON.stringify({
+          target,
+          zip_path: wfrBrowseState.selectedArtifact || '',
+          limit
+        })
+      });
+
+      if (!result.success || !result.entries || result.entries.length === 0) {
+        listEl.innerHTML = '<div class="loading">No timeline data</div>';
+        return;
+      }
+
+      const entries = result.entries;
+      const sourceNote = result.source === 'live' ? '<div style="color:var(--text-secondary);margin-bottom:8px;font-style:italic;">Live data (no collection timeline found)</div>' : '';
+
+      listEl.innerHTML = sourceNote +
+        `<div class="forensics-timeline-header wfr-timeline-header"><span>Time</span><span>Path</span><span>Size</span><span>Owner</span></div>` +
+        entries.map(e => {
+          const time = e.time ? new Date(e.time).toLocaleString() : '';
+          const sizeVal = e.size ? formatBytes(parseInt(e.size) || 0) : '';
+          return `
+          <div class="forensics-timeline-item wfr-timeline-item">
+            <span>${escapeHtml(time)}</span>
+            <span>${escapeHtml(e.path || '')}</span>
+            <span>${sizeVal}</span>
+            <span>${escapeHtml(e.owner || '')}</span>
+          </div>`;
+        }).join('');
+    } catch (error) {
+      listEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
   }
 
   async function winForensicsRetrieve() {
@@ -5890,6 +5936,7 @@
       btn.textContent = fb.classList.contains('forensics-filebrowser-fullscreen') ? 'Exit Fullscreen' : 'Fullscreen';
     });
     document.getElementById('wfr-findings-severity').addEventListener('change', filterWinForensicsFindings);
+    document.getElementById('wfr-load-timeline-btn').addEventListener('click', loadWinForensicsTimeline);
 
     // Theme toggle
     document.getElementById('theme-toggle-btn').addEventListener('click', toggleTheme);

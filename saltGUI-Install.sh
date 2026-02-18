@@ -905,7 +905,7 @@ Environment=NODE_ENV=production
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=$INSTALL_DIR/logs $INSTALL_DIR/config /var/cache/salt/master/minions
+ReadWritePaths=$INSTALL_DIR/logs $INSTALL_DIR/config /var/cache/salt/master/minions /srv/salt
 PrivateTmp=true
 
 [Install]

@@ -1476,6 +1476,20 @@
                       <div class="loading">No findings</div>
                     </div>
                   </div>
+                  <!-- Timeline -->
+                  <div id="wfr-timeline-section" class="hidden">
+                    <div class="forensics-section-header">
+                      Timeline
+                      <div class="option-group" style="display:inline-flex;margin-left:var(--spacing-md);">
+                        <label>Limit:</label>
+                        <input type="number" id="wfr-timeline-limit" value="100" min="10" max="1000" style="width:80px;">
+                        <button id="wfr-load-timeline-btn" class="btn btn-small">Load Timeline</button>
+                      </div>
+                    </div>
+                    <div id="wfr-timeline-list" class="forensics-timeline-list">
+                      <div class="loading">Click Load to view timeline</div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

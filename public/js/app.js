@@ -4452,7 +4452,8 @@
           if (content && typeof content === 'object') {
             content = content[minion] || content[Object.keys(content)[0]] || '';
           }
-          contentEl.textContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+          const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+          formatFileContent(text, artifactPath, contentEl);
         } else {
           contentEl.textContent = `Error: ${result.error || 'Unknown'}`;
         }
@@ -4574,6 +4575,54 @@
     };
   }
 
+  function formatFileContent(content, filePath, contentEl) {
+    const lower = (filePath || '').toLowerCase();
+
+    // CSV: render as scrollable HTML table
+    if (lower.endsWith('.csv')) {
+      const lines = content.split('\n').filter(l => l.trim());
+      if (lines.length > 1) {
+        const parseCSVLine = (line) => {
+          const fields = [];
+          let current = '', inQuotes = false;
+          for (let i = 0; i < line.length; i++) {
+            if (line[i] === '"') { inQuotes = !inQuotes; }
+            else if (line[i] === ',' && !inQuotes) { fields.push(current.trim()); current = ''; }
+            else { current += line[i]; }
+          }
+          fields.push(current.trim());
+          return fields;
+        };
+        const headers = parseCSVLine(lines[0]);
+        let html = '<table class="csv-table"><thead><tr>';
+        headers.forEach(h => { html += `<th>${escapeHtml(h)}</th>`; });
+        html += '</tr></thead><tbody>';
+        for (let i = 1; i < Math.min(lines.length, 500); i++) {
+          const cols = parseCSVLine(lines[i]);
+          html += '<tr>';
+          cols.forEach(c => { html += `<td>${escapeHtml(c)}</td>`; });
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        if (lines.length > 500) html += `<div class="text-muted">(showing 500 of ${lines.length} rows)</div>`;
+        contentEl.innerHTML = html;
+        return;
+      }
+    }
+
+    // JSON: pretty-print
+    if (lower.endsWith('.json')) {
+      try {
+        const parsed = JSON.parse(content);
+        contentEl.textContent = JSON.stringify(parsed, null, 2);
+        return;
+      } catch { /* fall through to plain text */ }
+    }
+
+    // Default: plain text
+    contentEl.textContent = content;
+  }
+
   async function viewForensicsFile(filePath) {
     const contentEl = document.getElementById('fr-file-content');
     const titleEl = document.getElementById('fr-file-viewer-title');
@@ -4599,7 +4648,8 @@
         } else {
           content = '';
         }
-        contentEl.textContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+        const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+        formatFileContent(text, filePath, contentEl);
       }
     } catch (error) {
       contentEl.textContent = `Error: ${error.message}`;
@@ -4849,9 +4899,10 @@
   };
 
   const wfrLevelDescs = {
-    quick: 'Quick: Running processes, network connections, logged-in users, scheduled tasks, recent event logs, autorun keys, services',
-    standard: 'Standard: + WMI subscriptions, PowerShell history, installed software, local users/groups, firewall rules, DNS cache, prefetch, recent files, ADS',
-    advanced: 'Advanced: + Full event log export, registry persistence, certificates, drivers, named pipes, COM hijack checks, AD checks (if DC)'
+    quick: 'Quick: Running processes, network connections, logged-in users, scheduled tasks, recent event logs, autorun keys, services, targeted security events, Defender status',
+    standard: 'Standard: + Deep persistence (AppInit_DLLs, LSA, SSPs, PS profiles, startup folders), PowerShell 4104, RDP sessions, SMB shares, credential logons, secedit export',
+    advanced: 'Advanced: + Critical binary hashes, Authenticode verification, Sysmon events, Defender exclusions, enhanced AD (SPNs, trusts, disabled accounts)',
+    comprehensive: 'Comprehensive: + File timeline (7-day), full event log preservation (9 sources), log tampering detection, System32 integrity, full security policy export'
   };
 
   function switchWinForensicsTab(tabName) {
@@ -4955,7 +5006,7 @@
         const status = job.status || 'unknown';
 
         if (status === 'completed' && job.results) {
-          outputEl.textContent = formatWinForensicsResults(job.results);
+          outputEl.innerHTML = formatWinForensicsResultsHtml(job.results);
           loadWinForensicsJobs();
           showToast('Windows collection complete', 'success');
           return;
@@ -5014,6 +5065,81 @@
     return out || 'No results';
   }
 
+  function formatWinForensicsResultsHtml(results) {
+    if (!results) return escapeHtml('No results');
+    let html = '';
+    for (const [minion, output] of Object.entries(results)) {
+      html += `<span class="log-minion-header">── ${escapeHtml(minion)} ──────────────────────────────</span>\n`;
+      if (output === false) {
+        html += '<span class="log-error">[ERROR] Salt returned false — minion may be offline or timed out.</span>\n\n';
+      } else if (typeof output === 'string') {
+        if (output.includes('WIN_FORENSICS_DONE')) {
+          const lines = output.split('\n');
+          const zipLine = lines.find(l => l.includes('[ZIP]'));
+          const zip = zipLine ? zipLine.replace('[ZIP] ', '').trim() : '';
+          const statusLines = lines.filter(l => l.startsWith('[STATUS]'));
+          if (zip) html += `<span class="log-zip">ZIP: ${escapeHtml(zip)}</span>\n`;
+          if (statusLines.length > 0) html += statusLines.map(l => `<span class="log-status">${escapeHtml(l.trim())}</span>`).join('\n') + '\n';
+          const issues = lines.filter(l => /error|fail/i.test(l) && !/SilentlyContinue|ErrorAction/i.test(l) && !l.includes('WIN_FORENSICS_DONE'));
+          if (issues.length > 0) {
+            html += `\n<span class="log-warning">Warnings (${issues.length}):</span>\n`;
+            html += issues.slice(0, 10).map(s => `<span class="log-warning">  ! ${escapeHtml(s.trim())}</span>`).join('\n') + '\n';
+          }
+          html += '\n';
+        } else {
+          const lines = output.split('\n');
+          if (lines.length > 40) {
+            html += lines.slice(0, 15).map(l => colorizeOutputLine(l)).join('\n') + '\n';
+            html += `  ... (${lines.length - 30} lines omitted) ...\n`;
+            html += lines.slice(-15).map(l => colorizeOutputLine(l)).join('\n') + '\n\n';
+          } else {
+            html += lines.map(l => colorizeOutputLine(l)).join('\n') + '\n\n';
+          }
+        }
+      } else {
+        html += escapeHtml(JSON.stringify(output, null, 2)) + '\n\n';
+      }
+    }
+    return html || escapeHtml('No results');
+  }
+
+  function formatScanResultsHtml(findings) {
+    let html = '';
+    for (const [minion, items] of Object.entries(findings)) {
+      html += `<span class="log-minion-header">── ${escapeHtml(minion)} ──────────────────────────────</span>\n`;
+      if (items.length === 0) {
+        html += '  No suspicious findings detected.\n\n';
+      } else {
+        const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+        items.forEach(f => { const s = (f.severity || '').toLowerCase(); counts[s] = (counts[s] || 0) + 1; });
+        const summary = Object.entries(counts).filter(([,c]) => c > 0).map(([s,c]) => `${s.toUpperCase()}: ${c}`).join(', ');
+        html += `  Summary: ${escapeHtml(summary)}\n\n`;
+        items.forEach(f => {
+          const sev = (f.severity || '').toLowerCase();
+          const cls = sev === 'critical' ? 'log-severity-critical' : sev === 'high' ? 'log-severity-high' : sev === 'medium' ? 'log-severity-medium' : sev === 'low' ? 'log-severity-low' : 'log-severity-info';
+          html += `  <span class="${cls}">[${escapeHtml((f.severity || '').toUpperCase())}]</span> [${escapeHtml(f.category || '')}] ${escapeHtml(f.message || '')}\n`;
+        });
+        html += '\n';
+      }
+    }
+    return html || 'Scan complete - no findings';
+  }
+
+  function colorizeOutputLine(line) {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith('[STATUS]')) return `<span class="log-status">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[ERROR]')) return `<span class="log-error">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[FINDING]')) return `<span class="log-finding">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[ZIP]')) return `<span class="log-zip">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[WARNING]') || trimmed.startsWith('!')) return `<span class="log-warning">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[CRITICAL]')) return `<span class="log-severity-critical">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[HIGH]')) return `<span class="log-severity-high">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[MEDIUM]')) return `<span class="log-severity-medium">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[LOW]')) return `<span class="log-severity-low">${escapeHtml(line)}</span>`;
+    if (trimmed.startsWith('[INFO]')) return `<span class="log-severity-info">${escapeHtml(line)}</span>`;
+    return escapeHtml(line);
+  }
+
   async function loadWinForensicsJobs() {
     const listEl = document.getElementById('wfr-jobs-list');
     try {
@@ -5049,7 +5175,7 @@
     try {
       const d = await api(`/api/forensics-windows/jobs/${jobId}`);
       if (d.job && d.job.results) {
-        outputEl.textContent = formatWinForensicsResults(d.job.results);
+        outputEl.innerHTML = formatWinForensicsResultsHtml(d.job.results);
       } else {
         const status = d.job ? d.job.status : 'unknown';
         outputEl.textContent = `Status: ${status}`;
@@ -5087,6 +5213,34 @@
     }
   }
 
+  async function winForensicsDeepScan() {
+    const targets = getWinForensicsCollectTargets();
+    if (!targets || (Array.isArray(targets) && targets.length === 0)) {
+      showToast('Select Windows targets first', 'error');
+      return;
+    }
+    const outputEl = document.getElementById('wfr-collect-output');
+    outputEl.textContent = 'Running deep Windows security scan (Defender, SFC, DISM, signatures)...\nThis may take 5-10 minutes.';
+
+    try {
+      const result = await api('/api/forensics-windows/scan', {
+        method: 'POST',
+        body: JSON.stringify({ targets, deep: true, timeout: 600 })
+      });
+      if (result.success && result.job_id) {
+        outputEl.textContent = `Deep scan job started: ${result.job_id}\nRunning Defender scan, SFC, DISM, Authenticode verification...`;
+        showToast('Deep scan started (5-10 min)', 'success');
+        pollWinForensicsScanJob(result.job_id);
+        loadWinForensicsJobs();
+      } else {
+        outputEl.textContent = `Error: ${result.error || 'Unknown'}`;
+      }
+    } catch (error) {
+      outputEl.textContent = `Error: ${error.message}`;
+      showToast('Deep scan failed', 'error');
+    }
+  }
+
   async function pollWinForensicsScanJob(jobId) {
     const outputEl = document.getElementById('wfr-collect-output');
 
@@ -5098,24 +5252,9 @@
 
         if (status === 'completed') {
           if (job.findings) {
-            let out = '';
-            for (const [minion, findings] of Object.entries(job.findings)) {
-              out += `── ${minion} ──────────────────────────────\n`;
-              if (findings.length === 0) {
-                out += '  No suspicious findings detected.\n\n';
-              } else {
-                const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-                findings.forEach(f => { const s = (f.severity || '').toLowerCase(); counts[s] = (counts[s] || 0) + 1; });
-                out += `  Summary: ${Object.entries(counts).filter(([,c]) => c > 0).map(([s,c]) => `${s.toUpperCase()}: ${c}`).join(', ')}\n\n`;
-                findings.forEach(f => {
-                  out += `  [${(f.severity || '').toUpperCase()}] [${f.category || ''}] ${f.message || ''}\n`;
-                });
-                out += '\n';
-              }
-            }
-            outputEl.textContent = out || 'Scan complete - no findings';
+            outputEl.innerHTML = formatScanResultsHtml(job.findings);
           } else if (job.results) {
-            outputEl.textContent = formatWinForensicsResults(job.results);
+            outputEl.innerHTML = formatWinForensicsResultsHtml(job.results);
           }
           loadWinForensicsJobs();
           showToast('Windows scan complete', 'success');
@@ -5234,6 +5373,8 @@
         const files = result.files[minion] || result.files[Object.keys(result.files)[0]] || [];
         wfrBrowseState.fileList = files;
         renderWinForensicsFiletree();
+      } else {
+        filetreeEl.innerHTML = `<div class="loading">Error: ${escapeHtml(result.error || 'Failed to browse')}</div>`;
       }
     } catch (error) {
       filetreeEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
@@ -5243,14 +5384,14 @@
   function buildWinFileTreeStructure(flatFiles) {
     const root = { name: '/', children: {}, files: [] };
     for (const f of flatFiles) {
-      // Windows ZIP entries use forward slashes
-      const clean = f.replace(/\/$/, '');
+      // Windows ZIP entries may use forward or back slashes
+      const clean = f.replace(/[\\/]$/, '');
       if (!clean) continue;
-      const parts = clean.split('/');
+      const parts = clean.split(/[/\\]/);
       let node = root;
       for (let i = 0; i < parts.length; i++) {
         if (i === parts.length - 1) {
-          if (f.endsWith('/')) {
+          if (f.endsWith('/') || f.endsWith('\\')) {
             if (!node.children[parts[i]]) node.children[parts[i]] = { name: parts[i], children: {}, files: [] };
           } else {
             node.files.push({ name: parts[i], path: f });
@@ -5333,11 +5474,15 @@
           content = result.content;
         } else if (result.content && typeof result.content === 'object') {
           const t = wfrBrowseState.selectedMinion;
-          content = result.content[t] || result.content[Object.keys(result.content)[0]] || '';
+          const raw = result.content[t] !== undefined ? result.content[t] : result.content[Object.keys(result.content)[0]];
+          content = (raw === false || raw === null || raw === undefined) ? '(No content returned - minion may have timed out)' : raw;
         } else {
           content = '';
         }
-        contentEl.textContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+        const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+        formatFileContent(text, filePath, contentEl);
+      } else {
+        contentEl.textContent = `Error: ${result.error || 'Failed to read file'}`;
       }
     } catch (error) {
       contentEl.textContent = `Error: ${error.message}`;
@@ -5376,6 +5521,32 @@
     const filtered = severity ? wfrBrowseState.allFindings.filter(f => (f.severity || '').toLowerCase() === severity) : wfrBrowseState.allFindings;
     wfrBrowseState.findings = filtered;
     renderForensicsFindings(filtered, document.getElementById('wfr-findings-list'), document.getElementById('wfr-severity-summary'));
+  }
+
+  async function winForensicsRetrieve() {
+    if (!wfrBrowseState.selectedArtifact || !wfrBrowseState.selectedMinion) {
+      showToast('Select a collection first', 'error');
+      return;
+    }
+    const btn = document.getElementById('wfr-retrieve-btn');
+    btn.disabled = true;
+    btn.textContent = 'Retrieving...';
+    try {
+      const result = await api('/api/forensics-windows/retrieve', {
+        method: 'POST',
+        body: JSON.stringify({ target: wfrBrowseState.selectedMinion, artifact_path: wfrBrowseState.selectedArtifact })
+      });
+      showToast(result.success ? 'Artifact retrieved to master' : (result.error || 'Failed'), result.success ? 'success' : 'error');
+      if (result.success) {
+        // Re-browse to use local path
+        selectWinForensicsCollection(wfrBrowseState.selectedMinion, wfrBrowseState.selectedArtifact);
+      }
+    } catch (error) {
+      showToast(`Retrieve failed: ${error.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Retrieve to Master';
+    }
   }
 
   async function winForensicsCleanup() {
@@ -5675,12 +5846,15 @@
     });
     document.getElementById('wfr-collect-btn').addEventListener('click', winForensicsCollect);
     document.getElementById('wfr-scan-btn').addEventListener('click', winForensicsScan);
+    document.getElementById('wfr-deep-scan-btn').addEventListener('click', winForensicsDeepScan);
     document.getElementById('wfr-collect-level').addEventListener('change', (e) => {
       const descEl = document.getElementById('wfr-level-desc');
       if (descEl) descEl.textContent = wfrLevelDescs[e.target.value] || '';
       const timeoutEl = document.getElementById('wfr-collect-timeout');
       const currentTimeout = parseInt(timeoutEl.value) || 180;
-      if (e.target.value === 'advanced' && currentTimeout < 360) {
+      if (e.target.value === 'comprehensive' && currentTimeout < 600) {
+        timeoutEl.value = 600;
+      } else if (e.target.value === 'advanced' && currentTimeout < 360) {
         timeoutEl.value = 360;
       } else if (e.target.value === 'quick' && currentTimeout > 60) {
         timeoutEl.value = 60;
@@ -5703,10 +5877,17 @@
       showToast('Copied', 'success');
     });
     document.getElementById('wfr-cleanup-btn').addEventListener('click', winForensicsCleanup);
+    document.getElementById('wfr-retrieve-btn').addEventListener('click', winForensicsRetrieve);
     document.getElementById('wfr-run-analysis-btn').addEventListener('click', winForensicsRunAnalysis);
     document.getElementById('wfr-file-copy-btn').addEventListener('click', () => {
       navigator.clipboard.writeText(document.getElementById('wfr-file-content').textContent);
       showToast('Copied', 'success');
+    });
+    document.getElementById('wfr-fullscreen-btn').addEventListener('click', () => {
+      const fb = document.getElementById('wfr-filebrowser');
+      fb.classList.toggle('forensics-filebrowser-fullscreen');
+      const btn = document.getElementById('wfr-fullscreen-btn');
+      btn.textContent = fb.classList.contains('forensics-filebrowser-fullscreen') ? 'Exit Fullscreen' : 'Fullscreen';
     });
     document.getElementById('wfr-findings-severity').addEventListener('change', filterWinForensicsFindings);
 

@@ -82,7 +82,7 @@
           <div class="nav-item" data-view="network">Network</div>
           <div class="nav-item" data-view="files">Files</div>
           <div class="nav-item" data-view="logs">Logs</div>
-          <div class="nav-item" data-view="forensics">Forensics</div>
+          <div class="nav-item" data-view="forensics">Lin Forensics</div>
           <div class="nav-item" data-view="win-forensics">Win Forensics</div>
           <div class="nav-item" data-view="suspicious">Suspicious</div>
           <div class="nav-item" data-view="monitoring">Monitoring</div>
@@ -1150,7 +1150,7 @@
         <!-- Forensics View -->
         <div id="view-forensics" class="view hidden">
           <div class="view-header">
-            <h2>Forensics</h2>
+            <h2>Lin Forensics</h2>
           </div>
           <!-- Tabs -->
           <div class="forensics-tabs">
@@ -1370,17 +1370,19 @@
                     <option value="quick">Quick</option>
                     <option value="standard" selected>Standard</option>
                     <option value="advanced">Advanced</option>
+                    <option value="comprehensive">Comprehensive</option>
                   </select>
                 </div>
                 <div class="option-group">
                   <label>Timeout:</label>
-                  <input type="number" id="wfr-collect-timeout" value="180" min="30" max="600" style="width:80px;">
+                  <input type="number" id="wfr-collect-timeout" value="180" min="30" max="3600" style="width:80px;">
                 </div>
               </div>
               <div id="wfr-level-desc" class="forensics-level-desc">Standard: Processes, network, persistence, users, services, firewall, DNS, prefetch, recent files</div>
               <div class="forensics-controls fr-collect-actions">
                 <button id="wfr-collect-btn" class="btn btn-primary">Collect</button>
                 <button id="wfr-scan-btn" class="btn btn-small">Quick Scan</button>
+                <button id="wfr-deep-scan-btn" class="btn btn-small">Deep Scan</button>
               </div>
             </div>
             <!-- Jobs -->
@@ -1431,6 +1433,7 @@
                   <!-- Action bar -->
                   <div class="forensics-action-bar">
                     <span id="wfr-browse-label" class="forensics-browse-label"></span>
+                    <button id="wfr-retrieve-btn" class="btn btn-small" title="Copy artifact ZIP to Salt master for faster browsing">Retrieve to Master</button>
                     <button id="wfr-run-analysis-btn" class="btn btn-primary btn-small" title="Run live security analysis on the selected Windows minion">Run Analysis</button>
                   </div>
                   <!-- File browser -->
@@ -1438,6 +1441,7 @@
                     <div class="forensics-filebrowser-tree">
                       <div class="forensics-filetree-header">
                         <span>Files</span>
+                        <button id="wfr-fullscreen-btn" class="btn btn-small" title="Toggle fullscreen">Fullscreen</button>
                       </div>
                       <div id="wfr-filetree" class="forensics-filetree-list">
                         <div class="loading">Loading files...</div>

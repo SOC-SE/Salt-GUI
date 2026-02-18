@@ -257,6 +257,7 @@ html, body {
   flex-direction: column;
   flex-shrink: 0;
   padding: var(--spacing-sm) 0;
+  overflow-y: auto;
 }
 
 .nav-section {
@@ -317,6 +318,8 @@ html, body {
 .view {
   display: none;
   height: 100%;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .view.active {
@@ -2643,6 +2646,7 @@ label {
   flex: 1;
   min-height: 0;
   border: 1px solid var(--border-color);
+  overflow: hidden;
 }
 
 .forensics-browse-sidebar {
@@ -3192,3 +3196,50 @@ label {
   border-radius: 2px;
   margin-left: 4px;
 }
+
+/* ============================================================
+   CSV Table in File Viewer
+   ============================================================ */
+
+.csv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.csv-table th, .csv-table td {
+  border: 1px solid var(--border-color);
+  padding: 3px 6px;
+  text-align: left;
+  white-space: nowrap;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.csv-table th {
+  background: var(--bg-tertiary);
+  position: sticky;
+  top: 0;
+}
+
+.csv-table tr:hover td {
+  background: var(--hover-bg);
+}
+
+/* ============================================================
+   Colored Log Lines (Forensics Output)
+   ============================================================ */
+
+.log-status { color: var(--status-success); }
+.log-error { color: var(--status-error); }
+.log-warning { color: var(--status-warning); }
+.log-finding { color: var(--status-warning); font-weight: bold; }
+.log-zip { color: var(--status-info); }
+.log-minion-header { color: var(--text-primary); font-weight: bold; }
+.log-severity-critical { color: var(--status-error); font-weight: bold; }
+.log-severity-high { color: var(--status-error); }
+.log-severity-medium { color: var(--status-warning); }
+.log-severity-low { color: #cccc00; }
+.log-severity-info { color: var(--status-info); }

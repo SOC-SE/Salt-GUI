@@ -424,6 +424,11 @@
         loadForensicsJobs();
         renderForensicsDeviceChecklist();
         break;
+      case 'win-forensics':
+        populateWinForensicsTargetSelects();
+        loadWinForensicsJobs();
+        renderWinForensicsDeviceChecklist();
+        break;
     }
   }
 
@@ -4831,6 +4836,565 @@
   }
 
   // ============================================================
+  // Windows Forensics
+  // ============================================================
+
+  let wfrActiveTab = 'collect';
+  let wfrBrowseState = {
+    selectedMinion: null,
+    selectedArtifact: null,
+    fileList: [],
+    allFindings: [],
+    findings: []
+  };
+
+  const wfrLevelDescs = {
+    quick: 'Quick: Running processes, network connections, logged-in users, scheduled tasks, recent event logs, autorun keys, services',
+    standard: 'Standard: + WMI subscriptions, PowerShell history, installed software, local users/groups, firewall rules, DNS cache, prefetch, recent files, ADS',
+    advanced: 'Advanced: + Full event log export, registry persistence, certificates, drivers, named pipes, COM hijack checks, AD checks (if DC)'
+  };
+
+  function switchWinForensicsTab(tabName) {
+    wfrActiveTab = tabName;
+    document.querySelectorAll('.wfr-tab').forEach(t => t.classList.toggle('active', t.dataset.wftab === tabName));
+    document.querySelectorAll('#view-win-forensics .forensics-tab-content').forEach(c => {
+      const isActive = c.id === `wftab-${tabName}`;
+      c.classList.toggle('active', isActive);
+      c.classList.toggle('hidden', !isActive);
+    });
+    if (tabName === 'browse') loadWinForensicsCollectionsTree();
+  }
+
+  function populateWinForensicsTargetSelects() {
+    const winDevices = state.devices.filter(d => d.status === 'online' && (d.os_family === 'Windows' || d.kernel === 'Windows' || (d.os || '').toLowerCase().includes('windows')));
+    const el = document.getElementById('wfr-collect-single-target');
+    if (!el) return;
+    const val = el.value;
+    el.innerHTML = '<option value="">Select device...</option>' + winDevices.map(d => `<option value="${escapeHtml(d.id)}">${escapeHtml(d.id)}</option>`).join('');
+    if (val) el.value = val;
+  }
+
+  function renderWinForensicsDeviceChecklist() {
+    const container = document.getElementById('wfr-device-checklist');
+    const type = document.getElementById('wfr-collect-target-type').value;
+    if (type !== 'selected') { container.classList.add('hidden'); return; }
+    container.classList.remove('hidden');
+    const devices = (state.devices || []).filter(d => d.status === 'online' && (d.os_family === 'Windows' || d.kernel === 'Windows' || (d.os || '').toLowerCase().includes('windows')));
+    if (devices.length === 0) {
+      container.innerHTML = '<span style="color:var(--text-muted);">No online Windows devices</span>';
+      return;
+    }
+    container.innerHTML = devices.map(d => {
+      const checked = state.selectedDevices.has(d.id) ? 'checked' : '';
+      return `<label style="display:block;cursor:pointer;padding:1px 0;"><input type="checkbox" class="wfr-dev-cb" value="${escapeHtml(d.id)}" ${checked}> ${escapeHtml(d.id)} <span style="color:var(--text-muted);">${escapeHtml(d.os || '')}</span></label>`;
+    }).join('');
+    container.querySelectorAll('.wfr-dev-cb').forEach(cb => {
+      cb.addEventListener('change', () => {
+        if (cb.checked) state.selectedDevices.add(cb.value);
+        else state.selectedDevices.delete(cb.value);
+        const infoEl = document.getElementById('wfr-selected-info');
+        infoEl.textContent = `${state.selectedDevices.size} device(s) selected`;
+        infoEl.classList.remove('hidden');
+      });
+    });
+  }
+
+  function getWinForensicsCollectTargets() {
+    const type = document.getElementById('wfr-collect-target-type').value;
+    if (type === 'all-win') {
+      // Get all online Windows devices
+      const winDevices = state.devices.filter(d => d.status === 'online' && (d.os_family === 'Windows' || d.kernel === 'Windows' || (d.os || '').toLowerCase().includes('windows')));
+      return winDevices.length > 0 ? winDevices.map(d => d.id) : null;
+    }
+    if (type === 'single') return document.getElementById('wfr-collect-single-target').value;
+    // selected
+    const selected = Array.from(state.selectedDevices).filter(id => {
+      const d = state.devices.find(dev => dev.id === id);
+      return d && (d.os_family === 'Windows' || d.kernel === 'Windows' || (d.os || '').toLowerCase().includes('windows'));
+    });
+    return selected.length > 0 ? selected : null;
+  }
+
+  async function winForensicsCollect() {
+    const targets = getWinForensicsCollectTargets();
+    if (!targets || (Array.isArray(targets) && targets.length === 0)) {
+      showToast('Select Windows targets first', 'error');
+      return;
+    }
+    const level = document.getElementById('wfr-collect-level').value;
+    const timeout = parseInt(document.getElementById('wfr-collect-timeout').value) || 180;
+    const outputEl = document.getElementById('wfr-collect-output');
+    outputEl.textContent = `Starting Windows ${level} collection...`;
+
+    try {
+      const result = await api('/api/forensics-windows/collect', {
+        method: 'POST',
+        body: JSON.stringify({ targets, level, timeout })
+      });
+      if (result.success && result.job_id) {
+        outputEl.textContent = `Job started: ${result.job_id}`;
+        showToast('Windows collection started', 'success');
+        pollWinForensicsJob(result.job_id);
+        loadWinForensicsJobs();
+      } else {
+        outputEl.textContent = `Error: ${result.error || 'Unknown'}`;
+      }
+    } catch (error) {
+      outputEl.textContent = `Error: ${error.message}`;
+      showToast('Collection failed', 'error');
+    }
+  }
+
+  async function pollWinForensicsJob(jobId) {
+    const outputEl = document.getElementById('wfr-collect-output');
+
+    const poll = async () => {
+      try {
+        const result = await api(`/api/forensics-windows/jobs/${jobId}`);
+        const job = result.job || result;
+        const status = job.status || 'unknown';
+
+        if (status === 'completed' && job.results) {
+          outputEl.textContent = formatWinForensicsResults(job.results);
+          loadWinForensicsJobs();
+          showToast('Windows collection complete', 'success');
+          return;
+        } else if (status === 'failed') {
+          outputEl.textContent = `Job failed: ${job.error || 'Unknown error'}`;
+          loadWinForensicsJobs();
+          showToast('Collection failed', 'error');
+          return;
+        }
+
+        outputEl.textContent = `Collecting Windows artifacts... ${status}`;
+        loadWinForensicsJobs();
+        setTimeout(poll, 3000);
+      } catch (err) {
+        outputEl.textContent = `Poll error: ${err.message}`;
+      }
+    };
+
+    setTimeout(poll, 2000);
+  }
+
+  function formatWinForensicsResults(results) {
+    if (!results) return 'No results';
+    let out = '';
+    for (const [minion, output] of Object.entries(results)) {
+      out += `── ${minion} ──────────────────────────────\n`;
+      if (output === false) {
+        out += '[ERROR] Salt returned false — minion may be offline or timed out.\n\n';
+      } else if (typeof output === 'string') {
+        if (output.includes('WIN_FORENSICS_DONE')) {
+          const lines = output.split('\n');
+          const zipLine = lines.find(l => l.includes('[ZIP]'));
+          const zip = zipLine ? zipLine.replace('[ZIP] ', '').trim() : '';
+          const statusLines = lines.filter(l => l.startsWith('[STATUS]'));
+          if (zip) out += `ZIP: ${zip}\n`;
+          if (statusLines.length > 0) out += statusLines.map(l => l.trim()).join('\n') + '\n';
+          const issues = lines.filter(l => /error|fail/i.test(l) && !/SilentlyContinue|ErrorAction/i.test(l) && !l.includes('WIN_FORENSICS_DONE'));
+          if (issues.length > 0) {
+            out += `\nWarnings (${issues.length}):\n${issues.slice(0, 10).map(s => `  ! ${s.trim()}`).join('\n')}\n`;
+          }
+          out += '\n';
+        } else {
+          const lines = output.split('\n');
+          if (lines.length > 40) {
+            out += lines.slice(0, 15).join('\n') + '\n';
+            out += `  ... (${lines.length - 30} lines omitted) ...\n`;
+            out += lines.slice(-15).join('\n') + '\n\n';
+          } else {
+            out += output + '\n\n';
+          }
+        }
+      } else {
+        out += JSON.stringify(output, null, 2) + '\n\n';
+      }
+    }
+    return out || 'No results';
+  }
+
+  async function loadWinForensicsJobs() {
+    const listEl = document.getElementById('wfr-jobs-list');
+    try {
+      const result = await api('/api/forensics-windows/jobs');
+      if (result.success && result.jobs && result.jobs.length > 0) {
+        listEl.innerHTML = result.jobs.map(job => {
+          const jobKey = job.id || '';
+          const jobType = job.type || job.level || '';
+          const jobTime = job.created;
+          return `
+          <div class="forensics-job-item">
+            <span class="forensics-job-status ${job.status}">${job.status}</span>
+            <span>${escapeHtml(jobType)}</span>
+            <span class="forensics-job-id">${escapeHtml(jobKey)}</span>
+            <span style="color:var(--text-muted);font-size:11px;">${jobTime ? new Date(jobTime).toLocaleTimeString() : ''}</span>
+            <button class="btn btn-small wfr-job-view-btn" data-jobid="${escapeHtml(jobKey)}">View</button>
+          </div>`;
+        }).join('');
+        listEl.querySelectorAll('.wfr-job-view-btn').forEach(btn => {
+          btn.addEventListener('click', () => viewWinForensicsJob(btn.dataset.jobid));
+        });
+      } else {
+        listEl.innerHTML = '<div class="loading">No jobs yet</div>';
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function viewWinForensicsJob(jobId) {
+    const outputEl = document.getElementById('wfr-collect-output');
+    outputEl.textContent = 'Loading...';
+    try {
+      const d = await api(`/api/forensics-windows/jobs/${jobId}`);
+      if (d.job && d.job.results) {
+        outputEl.textContent = formatWinForensicsResults(d.job.results);
+      } else {
+        const status = d.job ? d.job.status : 'unknown';
+        outputEl.textContent = `Status: ${status}`;
+      }
+    } catch (error) {
+      outputEl.textContent = `Error: ${error.message}`;
+    }
+  }
+
+  async function winForensicsScan() {
+    const targets = getWinForensicsCollectTargets();
+    if (!targets || (Array.isArray(targets) && targets.length === 0)) {
+      showToast('Select Windows targets first', 'error');
+      return;
+    }
+    const outputEl = document.getElementById('wfr-collect-output');
+    outputEl.textContent = 'Running quick Windows security scan...';
+
+    try {
+      const result = await api('/api/forensics-windows/scan', {
+        method: 'POST',
+        body: JSON.stringify({ targets, timeout: 120 })
+      });
+      if (result.success && result.job_id) {
+        outputEl.textContent = `Scan job started: ${result.job_id}`;
+        showToast('Windows scan started', 'success');
+        pollWinForensicsScanJob(result.job_id);
+        loadWinForensicsJobs();
+      } else {
+        outputEl.textContent = `Error: ${result.error || 'Unknown'}`;
+      }
+    } catch (error) {
+      outputEl.textContent = `Error: ${error.message}`;
+      showToast('Scan failed', 'error');
+    }
+  }
+
+  async function pollWinForensicsScanJob(jobId) {
+    const outputEl = document.getElementById('wfr-collect-output');
+
+    const poll = async () => {
+      try {
+        const result = await api(`/api/forensics-windows/jobs/${jobId}`);
+        const job = result.job || result;
+        const status = job.status || 'unknown';
+
+        if (status === 'completed') {
+          if (job.findings) {
+            let out = '';
+            for (const [minion, findings] of Object.entries(job.findings)) {
+              out += `── ${minion} ──────────────────────────────\n`;
+              if (findings.length === 0) {
+                out += '  No suspicious findings detected.\n\n';
+              } else {
+                const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+                findings.forEach(f => { const s = (f.severity || '').toLowerCase(); counts[s] = (counts[s] || 0) + 1; });
+                out += `  Summary: ${Object.entries(counts).filter(([,c]) => c > 0).map(([s,c]) => `${s.toUpperCase()}: ${c}`).join(', ')}\n\n`;
+                findings.forEach(f => {
+                  out += `  [${(f.severity || '').toUpperCase()}] [${f.category || ''}] ${f.message || ''}\n`;
+                });
+                out += '\n';
+              }
+            }
+            outputEl.textContent = out || 'Scan complete - no findings';
+          } else if (job.results) {
+            outputEl.textContent = formatWinForensicsResults(job.results);
+          }
+          loadWinForensicsJobs();
+          showToast('Windows scan complete', 'success');
+          return;
+        } else if (status === 'failed') {
+          outputEl.textContent = `Scan failed: ${job.error || 'Unknown'}`;
+          loadWinForensicsJobs();
+          return;
+        }
+
+        outputEl.textContent = `Scanning Windows targets... ${status}`;
+        setTimeout(poll, 3000);
+      } catch (err) {
+        outputEl.textContent = `Poll error: ${err.message}`;
+      }
+    };
+
+    setTimeout(poll, 2000);
+  }
+
+  // Browse & Analyze tab
+
+  async function loadWinForensicsCollectionsTree() {
+    const treeEl = document.getElementById('wfr-collections-tree');
+    treeEl.innerHTML = '<div class="loading">Loading collections...</div>';
+    try {
+      const result = await api('/api/forensics-windows/collections');
+      if (!result.success) {
+        treeEl.innerHTML = '<div class="loading">Failed to load</div>';
+        return;
+      }
+      const collections = result.collections;
+      if (!collections || Object.keys(collections).length === 0) {
+        treeEl.innerHTML = '<div class="loading">No collections found</div>';
+        return;
+      }
+      // Group by minion
+      const grouped = {};
+      for (const [minion, output] of Object.entries(collections)) {
+        if (typeof output === 'string') {
+          grouped[minion] = output.split('\n').map(l => l.trim()).filter(l => l && l.endsWith('.zip'));
+        } else {
+          grouped[minion] = [];
+        }
+      }
+
+      // Filter out minions with no ZIP files
+      const hasFiles = Object.entries(grouped).filter(([, files]) => files.length > 0);
+      if (hasFiles.length === 0) {
+        treeEl.innerHTML = '<div class="loading">No collections found</div>';
+        return;
+      }
+
+      let html = '';
+      for (const [minion, files] of hasFiles) {
+        html += `<div class="fr-tree-minion" data-minion="${escapeHtml(minion)}">
+          <div class="wfr-tree-minion-label">${escapeHtml(minion)} (${files.length} archives)</div>
+          <div class="wfr-tree-artifacts hidden">
+            ${files.map((f, i) => `<div class="wfr-tree-artifact" data-minion="${escapeHtml(minion)}" data-path="C:\\Windows\\Temp\\forensics\\${escapeHtml(f)}">${escapeHtml(f)}${i === 0 ? ' <span style="color:var(--status-success);font-size:11px;">(latest)</span>' : ''}</div>`).join('')}
+          </div>
+        </div>`;
+      }
+      treeEl.innerHTML = html;
+
+      treeEl.onclick = (e) => {
+        const label = e.target.closest('.wfr-tree-minion-label');
+        if (label) {
+          const sub = label.parentElement.querySelector('.wfr-tree-artifacts');
+          sub.classList.toggle('hidden');
+          label.classList.toggle('expanded');
+          return;
+        }
+        const artifact = e.target.closest('.wfr-tree-artifact');
+        if (artifact) {
+          selectWinForensicsCollection(artifact.dataset.minion, artifact.dataset.path);
+        }
+      };
+    } catch (error) {
+      treeEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  async function selectWinForensicsCollection(minion, zipPath) {
+    wfrBrowseState.selectedMinion = minion;
+    wfrBrowseState.selectedArtifact = zipPath;
+    wfrBrowseState.allFindings = [];
+    wfrBrowseState.findings = [];
+
+    // Highlight selection
+    document.querySelectorAll('.wfr-tree-artifact').forEach(el => el.classList.remove('selected'));
+    const sel = document.querySelector(`.wfr-tree-artifact[data-path="${CSS.escape(zipPath)}"]`);
+    if (sel) sel.classList.add('selected');
+
+    // Show content panel
+    document.getElementById('wfr-browse-placeholder').classList.add('hidden');
+    document.getElementById('wfr-browse-content').classList.remove('hidden');
+    document.getElementById('wfr-browse-label').textContent = `${minion} / ${zipPath.split('\\').pop()}`;
+
+    // Hide findings until analysis is run
+    document.getElementById('wfr-findings-section').classList.add('hidden');
+
+    const filetreeEl = document.getElementById('wfr-filetree');
+    const contentEl = document.getElementById('wfr-file-content');
+    const titleEl = document.getElementById('wfr-file-viewer-title');
+
+    filetreeEl.innerHTML = '<div class="loading">Loading contents...</div>';
+    contentEl.textContent = 'Select a file to view its contents.';
+    titleEl.textContent = 'No file selected';
+
+    try {
+      const result = await api('/api/forensics-windows/browse', {
+        method: 'POST',
+        body: JSON.stringify({ target: minion, zip_path: zipPath })
+      });
+      if (result.success) {
+        const files = result.files[minion] || result.files[Object.keys(result.files)[0]] || [];
+        wfrBrowseState.fileList = files;
+        renderWinForensicsFiletree();
+      }
+    } catch (error) {
+      filetreeEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function buildWinFileTreeStructure(flatFiles) {
+    const root = { name: '/', children: {}, files: [] };
+    for (const f of flatFiles) {
+      // Windows ZIP entries use forward slashes
+      const clean = f.replace(/\/$/, '');
+      if (!clean) continue;
+      const parts = clean.split('/');
+      let node = root;
+      for (let i = 0; i < parts.length; i++) {
+        if (i === parts.length - 1) {
+          if (f.endsWith('/')) {
+            if (!node.children[parts[i]]) node.children[parts[i]] = { name: parts[i], children: {}, files: [] };
+          } else {
+            node.files.push({ name: parts[i], path: f });
+          }
+        } else {
+          if (!node.children[parts[i]]) node.children[parts[i]] = { name: parts[i], children: {}, files: [] };
+          node = node.children[parts[i]];
+        }
+      }
+    }
+    return root;
+  }
+
+  function renderWinTreeNode(node, depth = 0) {
+    let html = '';
+    const dirs = Object.values(node.children).sort((a, b) => a.name.localeCompare(b.name));
+    const files = (node.files || []).sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const dir of dirs) {
+      const hasContent = Object.keys(dir.children).length > 0 || dir.files.length > 0;
+      if (!hasContent) continue;
+      html += `<div class="fr-folder">`;
+      html += `<div class="fr-folder-name" style="padding-left:${depth * 16 + 8}px">${escapeHtml(dir.name)}</div>`;
+      html += `<div class="fr-folder-contents">${renderWinTreeNode(dir, depth + 1)}</div>`;
+      html += `</div>`;
+    }
+    for (const file of files) {
+      html += `<div class="fr-tree-file wfr-tree-file" data-filepath="${escapeHtml(file.path)}" style="padding-left:${depth * 16 + 8}px">${escapeHtml(file.name)}</div>`;
+    }
+    return html;
+  }
+
+  function renderWinForensicsFiletree() {
+    const files = wfrBrowseState.fileList;
+    const filetreeEl = document.getElementById('wfr-filetree');
+
+    if (!files || files.length === 0) {
+      filetreeEl.innerHTML = '<div class="loading">No files found</div>';
+      return;
+    }
+
+    const tree = buildWinFileTreeStructure(files);
+    const html = renderWinTreeNode(tree);
+    filetreeEl.innerHTML = html || '<div class="loading">Empty archive</div>';
+
+    filetreeEl.onclick = (e) => {
+      const folderName = e.target.closest('.fr-folder-name');
+      if (folderName) {
+        folderName.parentElement.classList.toggle('expanded');
+        return;
+      }
+      const fileEl = e.target.closest('.wfr-tree-file');
+      if (fileEl) {
+        const prev = filetreeEl.querySelector('.wfr-tree-file.selected');
+        if (prev) prev.classList.remove('selected');
+        fileEl.classList.add('selected');
+        viewWinForensicsFile(fileEl.dataset.filepath);
+      }
+    };
+  }
+
+  async function viewWinForensicsFile(filePath) {
+    const contentEl = document.getElementById('wfr-file-content');
+    const titleEl = document.getElementById('wfr-file-viewer-title');
+    titleEl.textContent = filePath;
+    contentEl.textContent = 'Loading...';
+
+    try {
+      const result = await api('/api/forensics-windows/browse/file', {
+        method: 'POST',
+        body: JSON.stringify({
+          target: wfrBrowseState.selectedMinion,
+          zip_path: wfrBrowseState.selectedArtifact,
+          file_path: filePath
+        })
+      });
+      if (result.success) {
+        let content;
+        if (typeof result.content === 'string') {
+          content = result.content;
+        } else if (result.content && typeof result.content === 'object') {
+          const t = wfrBrowseState.selectedMinion;
+          content = result.content[t] || result.content[Object.keys(result.content)[0]] || '';
+        } else {
+          content = '';
+        }
+        contentEl.textContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+      }
+    } catch (error) {
+      contentEl.textContent = `Error: ${error.message}`;
+    }
+  }
+
+  async function winForensicsRunAnalysis() {
+    const target = wfrBrowseState.selectedMinion;
+    if (!target) { showToast('Select a collection first', 'error'); return; }
+
+    const findingsSection = document.getElementById('wfr-findings-section');
+    const findingsEl = document.getElementById('wfr-findings-list');
+    const summaryEl = document.getElementById('wfr-severity-summary');
+    findingsSection.classList.remove('hidden');
+    findingsEl.innerHTML = '<div class="loading">Running Windows analysis...</div>';
+    summaryEl.classList.add('hidden');
+
+    try {
+      const result = await api('/api/forensics-windows/analyze', {
+        method: 'POST',
+        body: JSON.stringify({ target })
+      });
+      if (result.success) {
+        const all = extractFindings(result, target);
+        wfrBrowseState.allFindings = all;
+        wfrBrowseState.findings = all;
+        renderForensicsFindings(all, findingsEl, summaryEl);
+      }
+    } catch (error) {
+      findingsEl.innerHTML = `<div class="loading">Error: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function filterWinForensicsFindings() {
+    const severity = document.getElementById('wfr-findings-severity').value;
+    const filtered = severity ? wfrBrowseState.allFindings.filter(f => (f.severity || '').toLowerCase() === severity) : wfrBrowseState.allFindings;
+    wfrBrowseState.findings = filtered;
+    renderForensicsFindings(filtered, document.getElementById('wfr-findings-list'), document.getElementById('wfr-severity-summary'));
+  }
+
+  async function winForensicsCleanup() {
+    const age = parseFloat(document.getElementById('wfr-cleanup-age').value) || 2;
+    showConfirmModal('Cleanup Windows Artifacts', `Delete Windows forensic artifacts older than ${age} hours?`, async () => {
+      try {
+        const result = await api('/api/forensics-windows/cleanup', {
+          method: 'POST',
+          body: JSON.stringify({ age_hours: age })
+        });
+        showToast(result.success ? 'Cleanup complete' : (result.error || 'Failed'), result.success ? 'success' : 'error');
+        if (result.success) loadWinForensicsCollectionsTree();
+      } catch (error) {
+        showToast(`Cleanup failed: ${error.message}`, 'error');
+      }
+    });
+  }
+
+  // ============================================================
   // Event Listeners Setup
   // ============================================================
 
@@ -5104,6 +5668,47 @@
       const btn = document.getElementById('fr-fullscreen-btn');
       btn.textContent = fb.classList.contains('forensics-filebrowser-fullscreen') ? 'Exit Fullscreen' : 'Fullscreen';
     });
+
+    // Windows Forensics
+    document.querySelectorAll('.wfr-tab').forEach(tab => {
+      tab.addEventListener('click', () => switchWinForensicsTab(tab.dataset.wftab));
+    });
+    document.getElementById('wfr-collect-btn').addEventListener('click', winForensicsCollect);
+    document.getElementById('wfr-scan-btn').addEventListener('click', winForensicsScan);
+    document.getElementById('wfr-collect-level').addEventListener('change', (e) => {
+      const descEl = document.getElementById('wfr-level-desc');
+      if (descEl) descEl.textContent = wfrLevelDescs[e.target.value] || '';
+      const timeoutEl = document.getElementById('wfr-collect-timeout');
+      const currentTimeout = parseInt(timeoutEl.value) || 180;
+      if (e.target.value === 'advanced' && currentTimeout < 360) {
+        timeoutEl.value = 360;
+      } else if (e.target.value === 'quick' && currentTimeout > 60) {
+        timeoutEl.value = 60;
+      }
+    });
+    document.getElementById('wfr-collect-target-type').addEventListener('change', (e) => {
+      document.getElementById('wfr-collect-single-target').classList.toggle('hidden', e.target.value !== 'single');
+      const infoEl = document.getElementById('wfr-selected-info');
+      if (e.target.value === 'selected') {
+        const count = state.selectedDevices.size;
+        infoEl.textContent = count > 0 ? `${count} device(s) selected` : 'Select devices below';
+        infoEl.classList.remove('hidden');
+      } else {
+        infoEl.classList.add('hidden');
+      }
+      renderWinForensicsDeviceChecklist();
+    });
+    document.getElementById('wfr-collect-copy-btn').addEventListener('click', () => {
+      navigator.clipboard.writeText(document.getElementById('wfr-collect-output').textContent);
+      showToast('Copied', 'success');
+    });
+    document.getElementById('wfr-cleanup-btn').addEventListener('click', winForensicsCleanup);
+    document.getElementById('wfr-run-analysis-btn').addEventListener('click', winForensicsRunAnalysis);
+    document.getElementById('wfr-file-copy-btn').addEventListener('click', () => {
+      navigator.clipboard.writeText(document.getElementById('wfr-file-content').textContent);
+      showToast('Copied', 'success');
+    });
+    document.getElementById('wfr-findings-severity').addEventListener('change', filterWinForensicsFindings);
 
     // Theme toggle
     document.getElementById('theme-toggle-btn').addEventListener('click', toggleTheme);

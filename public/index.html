@@ -83,6 +83,7 @@
           <div class="nav-item" data-view="files">Files</div>
           <div class="nav-item" data-view="logs">Logs</div>
           <div class="nav-item" data-view="forensics">Forensics</div>
+          <div class="nav-item" data-view="win-forensics">Win Forensics</div>
           <div class="nav-item" data-view="suspicious">Suspicious</div>
           <div class="nav-item" data-view="monitoring">Monitoring</div>
           <div class="nav-item" data-view="passwords">User Management</div>
@@ -1327,6 +1328,149 @@
                       <button id="fr-load-metadata-btn" class="btn btn-small" style="margin-left:var(--spacing-md);">Load</button>
                     </div>
                     <pre id="fr-metadata-content" class="output-content" style="max-height:200px;">No metadata loaded.</pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Windows Forensics View -->
+        <div id="view-win-forensics" class="view hidden">
+          <div class="view-header">
+            <h2>Windows Forensics</h2>
+          </div>
+          <!-- Tabs -->
+          <div class="forensics-tabs">
+            <div class="wfr-tab active" data-wftab="collect">Collect</div>
+            <div class="wfr-tab" data-wftab="browse">Browse & Analyze</div>
+          </div>
+
+          <!-- Tab: Collect -->
+          <div id="wftab-collect" class="forensics-tab-content active">
+            <div class="fr-collect-section">
+              <div class="forensics-section-header">Collection Settings</div>
+              <div class="forensics-controls">
+                <div class="option-group">
+                  <label>Target:</label>
+                  <select id="wfr-collect-target-type">
+                    <option value="selected">Selected Windows Devices</option>
+                    <option value="single">Single Device</option>
+                    <option value="all-win">All Windows Devices</option>
+                  </select>
+                  <select id="wfr-collect-single-target" class="hidden">
+                    <option value="">Select device...</option>
+                  </select>
+                  <span id="wfr-selected-info" class="hidden" style="color:var(--text-secondary);font-size:12px;"></span>
+                  <div id="wfr-device-checklist" class="hidden" style="max-height:160px;overflow-y:auto;border:1px solid var(--border-color);padding:4px 8px;margin-top:4px;font-size:12px;"></div>
+                </div>
+                <div class="option-group">
+                  <label>Level:</label>
+                  <select id="wfr-collect-level">
+                    <option value="quick">Quick</option>
+                    <option value="standard" selected>Standard</option>
+                    <option value="advanced">Advanced</option>
+                  </select>
+                </div>
+                <div class="option-group">
+                  <label>Timeout:</label>
+                  <input type="number" id="wfr-collect-timeout" value="180" min="30" max="600" style="width:80px;">
+                </div>
+              </div>
+              <div id="wfr-level-desc" class="forensics-level-desc">Standard: Processes, network, persistence, users, services, firewall, DNS, prefetch, recent files</div>
+              <div class="forensics-controls fr-collect-actions">
+                <button id="wfr-collect-btn" class="btn btn-primary">Collect</button>
+                <button id="wfr-scan-btn" class="btn btn-small">Quick Scan</button>
+              </div>
+            </div>
+            <!-- Jobs -->
+            <div class="fr-collect-section">
+              <div class="forensics-section-header">Collection Jobs</div>
+              <div id="wfr-jobs-list" class="forensics-jobs-list">
+                <div class="loading">No jobs yet</div>
+              </div>
+            </div>
+            <!-- Output -->
+            <div class="fr-collect-section">
+              <div class="output-panel">
+                <div class="output-header">
+                  <span>Output</span>
+                  <button id="wfr-collect-copy-btn" class="btn btn-small">Copy</button>
+                </div>
+                <pre id="wfr-collect-output" class="output-content">No output yet.</pre>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab: Browse & Analyze -->
+          <div id="wftab-browse" class="forensics-tab-content hidden">
+            <div class="forensics-browse-layout">
+              <!-- Left sidebar: collections tree -->
+              <div class="forensics-browse-sidebar">
+                <div class="forensics-section-header">Collections</div>
+                <div id="wfr-collections-tree" class="forensics-collections-tree">
+                  <div class="loading">Loading collections...</div>
+                </div>
+                <div class="forensics-cleanup-controls">
+                  <div class="option-group">
+                    <label>Cleanup older than:</label>
+                    <select id="wfr-cleanup-age">
+                      <option value="1">1 hour</option>
+                      <option value="2" selected>2 hours</option>
+                      <option value="4">4 hours</option>
+                      <option value="8">8 hours</option>
+                    </select>
+                  </div>
+                  <button id="wfr-cleanup-btn" class="btn btn-danger btn-small">Cleanup</button>
+                </div>
+              </div>
+              <!-- Right panel -->
+              <div class="forensics-browse-main">
+                <div id="wfr-browse-placeholder" class="forensics-browse-placeholder">Select a collection from the sidebar to browse its contents.</div>
+                <div id="wfr-browse-content" class="hidden">
+                  <!-- Action bar -->
+                  <div class="forensics-action-bar">
+                    <span id="wfr-browse-label" class="forensics-browse-label"></span>
+                    <button id="wfr-run-analysis-btn" class="btn btn-primary btn-small" title="Run live security analysis on the selected Windows minion">Run Analysis</button>
+                  </div>
+                  <!-- File browser -->
+                  <div id="wfr-filebrowser" class="forensics-filebrowser">
+                    <div class="forensics-filebrowser-tree">
+                      <div class="forensics-filetree-header">
+                        <span>Files</span>
+                      </div>
+                      <div id="wfr-filetree" class="forensics-filetree-list">
+                        <div class="loading">Loading files...</div>
+                      </div>
+                    </div>
+                    <div class="forensics-filebrowser-viewer">
+                      <div class="forensics-viewer-header">
+                        <span id="wfr-file-viewer-title">No file selected</span>
+                        <button id="wfr-file-copy-btn" class="btn btn-small">Copy</button>
+                      </div>
+                      <pre id="wfr-file-content" class="output-content forensics-file-viewer-content">Select a file to view its contents.</pre>
+                    </div>
+                  </div>
+                  <!-- Findings -->
+                  <div id="wfr-findings-section" class="hidden">
+                    <div class="forensics-section-header">
+                      <span>Findings</span>
+                      <div class="option-group" style="margin-left:auto;">
+                        <label>Severity:</label>
+                        <select id="wfr-findings-severity">
+                          <option value="">All</option>
+                          <option value="critical">Critical</option>
+                          <option value="high">High</option>
+                          <option value="medium">Medium</option>
+                          <option value="low">Low</option>
+                          <option value="info">Info</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div id="wfr-severity-summary" class="forensics-severity-bar hidden"></div>
+                    <div id="wfr-findings-list" class="forensics-findings-list">
+                      <div class="loading">No findings</div>
+                    </div>
                   </div>
                 </div>
               </div>

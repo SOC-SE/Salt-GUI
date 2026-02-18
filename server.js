@@ -42,6 +42,7 @@ const logsRoutes = require('./src/routes/logs');
 const suspiciousRoutes = require('./src/routes/suspicious');
 const reportsRoutes = require('./src/routes/reports');
 const forensicsRoutes = require('./src/routes/forensics');
+const forensicsWindowsRoutes = require('./src/routes/forensics-windows');
 const monitoringRoutes = require('./src/routes/monitoring');
 
 // Initialize Express
@@ -206,6 +207,9 @@ app.use('/api/reports', reportsRoutes);
 
 // Forensics routes
 app.use('/api/forensics', forensicsRoutes);
+
+// Windows Forensics routes
+app.use('/api/forensics-windows', forensicsWindowsRoutes);
 
 // Monitoring routes (scheduled checks with change detection)
 app.use('/api/monitoring', monitoringRoutes);

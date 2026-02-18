@@ -19,7 +19,7 @@
     The unique identifier for this minion. Default: system hostname
 
 .PARAMETER SaltVersion
-    The Salt version to install. Default: 3007.1
+    The Salt version to install. Default: 3007.13
 
 .PARAMETER NonInteractive
     Run without prompts (requires MasterIP parameter)
@@ -34,7 +34,7 @@
 
 .EXAMPLE
     # Specify custom Salt version
-    .\Install-SaltMinion.ps1 -MasterIP "10.0.0.1" -SaltVersion "3007.1" -NonInteractive
+    .\Install-SaltMinion.ps1 -MasterIP "10.0.0.1" -SaltVersion "3007.13" -NonInteractive
 
 .NOTES
     Based on original script by Samuel Brucker 2025-2026
@@ -50,7 +50,7 @@ param(
     [string]$MinionID = "",
 
     [Parameter(Mandatory=$false)]
-    [string]$SaltVersion = "3007.1",
+    [string]$SaltVersion = "3007.13",
 
     [Parameter(Mandatory=$false)]
     [switch]$NonInteractive
@@ -99,9 +99,42 @@ function Get-UserInput {
     return $input
 }
 
+function Test-DomainController {
+    $cs = Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue
+    # DomainRole: 4 = Backup DC, 5 = Primary DC
+    return ($null -ne $cs) -and ($cs.DomainRole -ge 4)
+}
+
 function Test-SaltMinionInstalled {
     $service = Get-Service -Name "salt-minion" -ErrorAction SilentlyContinue
     return $null -ne $service
+}
+
+function Uninstall-ExistingMinion {
+    Write-Log "Removing existing Salt Minion to ensure clean install..." "WARN"
+
+    # Stop the service first
+    $service = Get-Service -Name "salt-minion" -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -ne 'Stopped') {
+        Stop-Service -Name "salt-minion" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+    }
+
+    # Find and uninstall via MSI product code
+    $product = Get-WmiObject Win32_Product | Where-Object { $_.Name -like '*Salt Minion*' }
+    if ($product) {
+        Write-Log "Uninstalling: $($product.Name) $($product.Version)"
+        $result = $product.Uninstall()
+        if ($result.ReturnValue -eq 0) {
+            Write-Log "Previous version uninstalled successfully"
+        } else {
+            Write-Log "Uninstall returned code: $($result.ReturnValue)" "WARN"
+        }
+        Start-Sleep -Seconds 3
+    } else {
+        # Fallback: just stop the service if WMI can't find the product
+        Write-Log "Could not find MSI product entry, stopping service only" "WARN"
+    }
 }
 
 function Stop-ExistingMinion {
@@ -111,6 +144,145 @@ function Stop-ExistingMinion {
         Stop-Service -Name "salt-minion" -Force
         Start-Sleep -Seconds 2
     }
+}
+
+function Test-PreFlightChecks {
+    param(
+        [string]$MasterIP
+    )
+
+    Write-Log "Running pre-flight checks..."
+    $failed = $false
+
+    # 1. PowerShell Execution Policy - check if GPO blocks script execution
+    $machinePolicy = Get-ExecutionPolicy -Scope MachinePolicy
+    $userPolicy = Get-ExecutionPolicy -Scope UserPolicy
+    if ($machinePolicy -ne 'Undefined' -and $machinePolicy -ne 'Bypass' -and $machinePolicy -ne 'Unrestricted') {
+        Write-Log "GPO enforces execution policy: $machinePolicy (MachinePolicy scope)" "ERROR"
+        Write-Log "  Fix: Ask domain admin to allow scripts, or run:" "WARN"
+        Write-Log "  powershell.exe -ExecutionPolicy Bypass -File $($MyInvocation.ScriptName)" "WARN"
+        $failed = $true
+    } elseif ($userPolicy -ne 'Undefined' -and $userPolicy -ne 'Bypass' -and $userPolicy -ne 'Unrestricted') {
+        Write-Log "GPO enforces execution policy: $userPolicy (UserPolicy scope)" "WARN"
+    }
+
+    # 2. PowerShell Language Mode - Constrained Language blocks .NET calls
+    if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+        Write-Log "PowerShell is in $($ExecutionContext.SessionState.LanguageMode) mode" "ERROR"
+        Write-Log "  This is typically caused by Device Guard/WDAC policy" "WARN"
+        Write-Log "  Salt Minion installation requires FullLanguage mode" "WARN"
+        $failed = $true
+    }
+
+    # 3. MSI installer restrictions via GPO
+    $msiPolicy = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer' -ErrorAction SilentlyContinue
+    if ($msiPolicy) {
+        # DisableMSI: 0=never, 1=non-managed only, 2=always
+        if ($msiPolicy.DisableMSI -eq 2) {
+            Write-Log "GPO blocks all MSI installations (DisableMSI=2)" "ERROR"
+            Write-Log "  Fix: Domain admin must set 'Disable Windows Installer' to 'Never'" "WARN"
+            $failed = $true
+        } elseif ($msiPolicy.DisableMSI -eq 1) {
+            Write-Log "GPO restricts non-managed MSI installations" "WARN"
+            Write-Log "  Installation may still work for administrators" "WARN"
+        }
+    }
+
+    # 4. Windows Defender - check if it could quarantine Salt
+    $defender = Get-MpPreference -ErrorAction SilentlyContinue
+    if ($defender -and -not $defender.DisableRealtimeMonitoring) {
+        $saltPath = "C:\Program Files\Salt Project\Salt"
+        $excluded = $false
+        if ($defender.ExclusionPath) {
+            foreach ($exc in $defender.ExclusionPath) {
+                if ($saltPath.StartsWith($exc.TrimEnd('\')) -or $exc.TrimEnd('\').StartsWith($saltPath)) {
+                    $excluded = $true
+                    break
+                }
+            }
+        }
+        if (-not $excluded) {
+            Write-Log "Windows Defender real-time protection is active" "WARN"
+            Write-Log "  Salt may be flagged as a remote admin tool. Adding exclusion..." "WARN"
+            try {
+                $existing = @()
+                if ($defender.ExclusionPath) { $existing = @($defender.ExclusionPath) }
+                $newExclusions = $existing + @($saltPath, "C:\ProgramData\Salt Project\Salt") | Select-Object -Unique
+                Set-MpPreference -ExclusionPath $newExclusions -ErrorAction Stop
+                Write-Log "  Defender exclusions added for Salt directories"
+            } catch {
+                Write-Log "  Could not add Defender exclusion (may need manual GPO change)" "WARN"
+                Write-Log "  If install fails, manually exclude: $saltPath" "WARN"
+            }
+        }
+    }
+
+    # 5. Network proxy detection
+    $proxyEnabled = $false
+    $winHttpProxy = netsh winhttp show proxy 2>&1 | Out-String
+    if ($winHttpProxy -match 'Proxy Server\(s\)\s*:\s*\S') {
+        Write-Log "System proxy detected (WinHTTP): check netsh winhttp show proxy" "WARN"
+        Write-Log "  Download may fail if proxy requires authentication" "WARN"
+        $proxyEnabled = $true
+    }
+    $ieProxy = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+    if ($ieProxy -and $ieProxy.ProxyEnable -eq 1) {
+        Write-Log "IE/User proxy enabled: $($ieProxy.ProxyServer)" "WARN"
+        $proxyEnabled = $true
+    }
+
+    # 6. Network connectivity to Salt Master
+    $portTest = Test-NetConnection -ComputerName $MasterIP -Port 4506 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+    if (-not $portTest.TcpTestSucceeded) {
+        Write-Log "Cannot reach Salt Master at ${MasterIP}:4506" "ERROR"
+        Write-Log "  Check firewall rules and network connectivity" "WARN"
+        # Also test 4505
+        $pubTest = Test-NetConnection -ComputerName $MasterIP -Port 4505 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        if (-not $pubTest.TcpTestSucceeded) {
+            Write-Log "  Also cannot reach ${MasterIP}:4505" "ERROR"
+        }
+        $failed = $true
+    } else {
+        Write-Log "Salt Master reachable at ${MasterIP}:4506"
+    }
+
+    # 7. Firewall GPO override check - local rules may be ignored
+    $domainProfile = Get-NetFirewallProfile -Name Domain -ErrorAction SilentlyContinue
+    if ($domainProfile -and $domainProfile.Enabled) {
+        $gpoRules = Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object { $_.PolicyStoreSource -eq 'GroupPolicy' } |
+            Measure-Object
+        if ($gpoRules.Count -gt 0) {
+            Write-Log "GPO firewall rules detected ($($gpoRules.Count) rules)" "WARN"
+            Write-Log "  Local firewall rules may be overridden by domain policy" "WARN"
+            Write-Log "  Ensure Salt ports 4505/4506 outbound are allowed in GPO" "WARN"
+        }
+    }
+
+    # 8. AppLocker check
+    try {
+        $appLocker = Get-AppLockerPolicy -Effective -ErrorAction Stop
+        $msiRules = $appLocker.RuleCollections | Where-Object { $_.RuleCollectionType -eq 'Msi' }
+        $exeRules = $appLocker.RuleCollections | Where-Object { $_.RuleCollectionType -eq 'Exe' }
+        if ($msiRules -and $msiRules.Count -gt 0) {
+            Write-Log "AppLocker MSI rules are active ($($msiRules.Count) rules)" "WARN"
+            Write-Log "  MSI installation may be blocked if not whitelisted" "WARN"
+        }
+        if ($exeRules -and $exeRules.Count -gt 0) {
+            Write-Log "AppLocker EXE rules are active ($($exeRules.Count) rules)" "WARN"
+            Write-Log "  salt-minion.exe may be blocked after installation" "WARN"
+        }
+    } catch {
+        # AppLocker not configured - this is fine
+    }
+
+    if ($failed) {
+        Write-Log "Pre-flight checks found blocking issues (see above)" "ERROR"
+        return $false
+    }
+
+    Write-Log "Pre-flight checks passed"
+    return $true
 }
 
 function Get-SaltInstallerUrl {
@@ -172,9 +344,11 @@ function Install-SaltMinion {
 function Set-FirewallRules {
     Write-Log "Configuring Windows Firewall..."
 
-    # Common Salt Minion paths
+    # Common Salt Minion paths (3007+ installs to root, older to bin/)
     $saltPaths = @(
+        "C:\Program Files\Salt Project\Salt\salt-minion.exe",
         "C:\Program Files\Salt Project\Salt\bin\salt-minion.exe",
+        "C:\salt\salt-minion.exe",
         "C:\salt\bin\salt-minion.exe"
     )
 
@@ -229,8 +403,16 @@ function Start-SaltMinionService {
         return $false
     }
 
-    # Set to automatic startup
-    Set-Service -Name $serviceName -StartupType Automatic
+    # On Domain Controllers, use delayed auto-start so salt-minion waits for
+    # AD DS (NTDS) to fully initialize after reboot. Without this, Salt's
+    # win32net.NetUserGetLocalGroups() call can fail with error 1355 if AD
+    # services haven't started yet.
+    if ($isDC) {
+        Write-Log "Setting delayed auto-start for DC compatibility"
+        sc.exe config $serviceName start= delayed-auto | Out-Null
+    } else {
+        Set-Service -Name $serviceName -StartupType Automatic
+    }
 
     # Start if not running
     if ($service.Status -ne 'Running') {
@@ -238,13 +420,28 @@ function Start-SaltMinionService {
         Start-Sleep -Seconds 3
     }
 
-    # Verify running
+    # Check for "Paused" state - a known issue where Salt's SSM service
+    # manager fails to fully start (common with VC++ runtime issues or
+    # on DCs where AD queries fail during startup)
     $service = Get-Service -Name $serviceName
+    if ($service.Status -eq 'Paused') {
+        Write-Log "Service entered 'Paused' state, attempting recovery..." "WARN"
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+        Start-Service -Name $serviceName
+        Start-Sleep -Seconds 5
+        $service = Get-Service -Name $serviceName
+    }
+
+    # Verify running
     if ($service.Status -eq 'Running') {
         Write-Log "Service '$serviceName' is running"
         return $true
     } else {
         Write-Log "Service '$serviceName' status: $($service.Status)" "WARN"
+        if ($isDC -and $service.Status -ne 'Running') {
+            Write-Log "On DCs, the service may need AD to fully start. Try: Restart-Service salt-minion" "WARN"
+        }
         return $false
     }
 }
@@ -282,10 +479,42 @@ if ([string]::IsNullOrWhiteSpace($MinionID)) {
 }
 Write-Log "Minion ID: $MinionID"
 
+# Detect Domain Controller
+$isDC = Test-DomainController
+if ($isDC) {
+    $dcDomain = (Get-WmiObject Win32_ComputerSystem).Domain
+    Write-Log "Domain Controller detected (domain: $dcDomain)" "WARN"
+    Write-Log "DC-specific mitigations will be applied" "WARN"
+}
+
+# Warn on hostname vs minion ID mismatch
+if ($MinionID -ne $env:COMPUTERNAME -and $MinionID -ne $env:COMPUTERNAME.ToLower()) {
+    Write-Log "Minion ID '$MinionID' differs from hostname '$($env:COMPUTERNAME)'" "WARN"
+    $fqdn = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+    if ($MinionID -ne $fqdn -and $MinionID -ne $fqdn.ToLower()) {
+        Write-Log "Minion ID also differs from FQDN '$fqdn'" "WARN"
+    }
+}
+
+# Pre-flight checks for common AD/GPO blockers
+$preFlightOk = Test-PreFlightChecks -MasterIP $MasterIP
+if (-not $preFlightOk) {
+    if (-not $NonInteractive) {
+        $continue = Read-Host "Continue anyway? (y/N)"
+        if ($continue -ne 'y' -and $continue -ne 'Y') {
+            Write-Log "Installation aborted by user"
+            exit 1
+        }
+    } else {
+        Write-Log "Pre-flight failures in non-interactive mode, aborting" "ERROR"
+        exit 1
+    }
+}
+
 # Check for existing installation
 if (Test-SaltMinionInstalled) {
     Write-Log "Existing Salt Minion installation detected" "WARN"
-    Stop-ExistingMinion
+    Uninstall-ExistingMinion
 }
 
 # Get installer URL
@@ -349,6 +578,9 @@ try {
     Write-Host "Minion ID:  $MinionID"
     Write-Host "Master IP:  $MasterIP"
     Write-Host "Status:     $(if ($serviceStarted) { 'Running' } else { 'Check Required' })"
+    if ($isDC) {
+        Write-Host "DC Mode:    Yes (delayed auto-start enabled)"
+    }
     Write-Host "Log File:   $logPath"
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan

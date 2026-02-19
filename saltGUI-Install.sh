@@ -599,6 +599,19 @@ EOF
         log_info "Salt file_roots configured to include ${INSTALL_DIR}/states"
     fi
 
+    # Enable file_recv for cp.push (required for Windows forensics retrieve-to-master)
+    local file_recv_conf="/etc/salt/master.d/file_recv.conf"
+    if [[ ! -f "$file_recv_conf" ]]; then
+        log_substep "Enabling file_recv for artifact retrieval (cp.push)..."
+        cat > "$file_recv_conf" << 'EOF'
+# Enable file receive from minions (required for cp.push)
+# Used by Windows forensics to retrieve ZIP artifacts to the master
+file_recv: True
+file_recv_max_size: 500
+EOF
+        log_info "file_recv enabled (max 500MB)"
+    fi
+
     # Install python-pam for PAM authentication support
     log_substep "Ensuring python-pam is available..."
     if [[ -x /opt/saltstack/salt/bin/pip3 ]]; then
@@ -1052,7 +1065,7 @@ uninstall() {
 
     # Remove Salt API configuration files created by installer
     local removed_salt_conf=false
-    for conf in /etc/salt/master.d/api.conf /etc/salt/master.d/user.conf /etc/salt/master.d/file_roots.conf; do
+    for conf in /etc/salt/master.d/api.conf /etc/salt/master.d/user.conf /etc/salt/master.d/file_roots.conf /etc/salt/master.d/file_recv.conf; do
         if [[ -f "$conf" ]] && grep -q "Salt-GUI" "$conf" 2>/dev/null; then
             log_substep "Removing $conf..."
             rm -f "$conf"

@@ -477,8 +477,19 @@ router.post('/retrieve', auditAction('forensics.retrieve'), async (req, res) => 
       client: 'local',
       tgt: target,
       fun: 'cp.push',
-      arg: [artifact_path]
+      arg: [artifact_path],
+      saltTimeout: 120,
+      timeout: 150000
     });
+    // cp.push returns false when file_recv is not enabled on the master
+    const minionResult = result && result[target];
+    if (minionResult === false || minionResult === 'false') {
+      return res.json({
+        success: false,
+        error: 'cp.push returned false. Ensure file_recv: True is set in /etc/salt/master.d/ and restart salt-master.',
+        result
+      });
+    }
     res.json({ success: true, result, local: true });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

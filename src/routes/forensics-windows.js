@@ -1347,7 +1347,8 @@ $criticalBins = @(
   "$env:WINDIR\\System32\\regsvr32.exe",
   "$env:WINDIR\\System32\\rundll32.exe",
   "$env:WINDIR\\System32\\certutil.exe",
-  "$env:WINDIR\\System32\\bitsadmin.exe"
+  "$env:WINDIR\\System32\\bitsadmin.exe",
+  "$env:WINDIR\\System32\\dns.exe"
 )
 $criticalBins | ForEach-Object {
   if(Test-Path $_) {
